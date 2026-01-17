@@ -192,15 +192,39 @@ class HRTFSpatialPlayer:
                         distance: float) -> tuple[np.ndarray, np.ndarray]:
         """
         Apply distance cues:
-        - Volume attenuation (inverse square approximation)
-        - Low-pass filter (air absorption)
+        - Volume attenuation (with extra gain so it's clearly audible)
+        - Low-pass filter (air absorption for far sounds)
+        - Extra brightness + presence when very close
         - Reverb (more reverb = farther)
         """
-        # Volume attenuation
-        volume = 1.0 / (distance ** 0.7)  # Gentler than inverse square
+        # Volume attenuation with global gain and a floor so it never gets too quiet
+        base_gain = 1.8  # Global boost so music is clearly audible
+        volume = base_gain / (max(0.5, distance) ** 0.7)  # Gentler than inverse square
+
+        min_volume = 0.25
+        if volume < min_volume:
+            volume = min_volume
 
         left = left * volume
         right = right * volume
+
+        # Extra "frequency" / brightness change when very close to the object.
+        # As distance decreases, we emphasize fast changes between samples
+        # (simple high-frequency boost) so close objects sound brighter.
+        if distance <= 2.0:
+            # 0 (far) .. 1 (very close)
+            closeness = max(0.0, min(1.0, 2.0 - distance))
+            # Strength of the high-frequency emphasis
+            alpha = 0.25 + 0.5 * closeness
+
+            prev_l = 0.0
+            prev_r = 0.0
+            for i in range(len(left)):
+                hp_l = left[i] - prev_l
+                hp_r = right[i] - prev_r
+                left[i] = left[i] + hp_l * alpha
+                right[i] = right[i] + hp_r * alpha
+                prev_l, prev_r = left[i], right[i]
 
         # Air absorption (simple low-pass for distance > 2)
         if distance > 2:

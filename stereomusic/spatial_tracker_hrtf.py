@@ -12,7 +12,7 @@ import os
 import sys
 import time
 import threading
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
@@ -46,6 +46,11 @@ _suppress_alsa_errors()
 
 from .object_detector import ObjectDetector, Detection, get_detector, create_fast_detector
 from .spatial_audio_hrtf import HRTFSpatialPlayer
+try:
+    from .hailo_detector import HailoObjectDetector
+    HAILO_AVAILABLE = True
+except ImportError:
+    HAILO_AVAILABLE = False
 
 
 @dataclass
@@ -197,6 +202,7 @@ class SpatialObjectTrackerHRTF:
         detector: Optional[ObjectDetector] = None,
         debug: bool = False,
         fast_mode: bool = False,
+        use_hailo: bool = False,
     ):
         """
         Initialize the tracker.
@@ -207,51 +213,63 @@ class SpatialObjectTrackerHRTF:
             target_class: Object class to track (e.g., 'person', 'cell phone')
             detector: Custom detector or None to create default
             debug: Show debug window with camera feed
-            fast_mode: Use optimizations for smoother performance:
-                      - Smaller input resolution (320 vs 640)
-                      - Class filtering at inference
-                      - Frame skipping with position interpolation
+            fast_mode: Use optimizations for smoother performance
+            use_hailo: Use Hailo AI Hat for acceleration
         """
         self.audio_file = audio_file
         self.target_class = target_class
         self.debug = debug
         self.fast_mode = fast_mode
+        self.use_hailo = use_hailo
 
-        # Create detector - use fast version if fast_mode enabled
-        if detector:
-            self.detector = detector
-        elif fast_mode:
-            self.detector = create_fast_detector(target_class)
-        else:
-            self.detector = get_detector()
+        if use_hailo and not HAILO_AVAILABLE:
+            print("Warning: Hailo requested but not available. Falling back to CPU.")
+            self.use_hailo = False
 
-        # Camera setup
-        if camera is None:
-            camera_type = os.getenv("CAMERA_TYPE")
-
-            # Auto-detect if not specified
-            if not camera_type:
-                try:
-                    from camera.pi_camera import PiCamera
-                    if PiCamera().is_available():
-                        camera_type = "pi"
-                except Exception:
-                    pass
-            
-            camera_type = (camera_type or "usb").lower()
-
-            if camera_type == "pi":
-                from camera.pi_camera import PiCamera
-                self.camera = PiCamera()
-            else:
-                from camera.usb_camera import USBCamera
-                camera_index = int(os.getenv("USB_CAMERA_INDEX", 0))
-                self.camera = USBCamera(camera_index)
-
-            self._own_camera = True
-        else:
-            self.camera = camera
+        if self.use_hailo:
+            print("Initializing Hailo AI acceleration...")
+            # HailoObjectDetector auto-detects device type and selects appropriate HEF
+            self.hailo_detector = HailoObjectDetector()
+            self.camera = None  # Hailo handles camera
             self._own_camera = False
+            self.detector = None
+        else:
+            self.hailo_detector = None
+            # Create detector - use fast version if fast_mode enabled
+            if detector:
+                self.detector = detector
+            elif fast_mode:
+                self.detector = create_fast_detector(target_class)
+            else:
+                self.detector = get_detector()
+
+            # Camera setup
+            if camera is None:
+                camera_type = os.getenv("CAMERA_TYPE")
+
+                # Auto-detect if not specified
+                if not camera_type:
+                    try:
+                        from camera.pi_camera import PiCamera
+                        if PiCamera().is_available():
+                            camera_type = "pi"
+                    except Exception:
+                        pass
+                
+                camera_type = (camera_type or "usb").lower()
+
+                if camera_type == "pi":
+                    from camera.pi_camera import PiCamera
+                    self.camera = PiCamera()
+                else:
+                    from camera.usb_camera import USBCamera
+                    camera_index = int(os.getenv("USB_CAMERA_INDEX", 0))
+                    self.camera = USBCamera(camera_index)
+
+                self._own_camera = True
+            else:
+                self.camera = camera
+                self._own_camera = False
 
         # Audio player (HRTF version)
         self.player: Optional[HRTFSpatialPlayer] = None
@@ -283,7 +301,7 @@ class SpatialObjectTrackerHRTF:
         if self._running:
             return
 
-        if not self.camera.is_available():
+        if not self.use_hailo and not self.camera.is_available():
             raise RuntimeError("Camera not available")
 
         self._loop_audio = loop_audio
@@ -295,12 +313,19 @@ class SpatialObjectTrackerHRTF:
         self.player.set_position(0.0, 0.0)
         self.player.set_distance(5.0)  # Start quiet
 
-        # Pre-load YOLO model with loading indicator
-        mode_str = "FAST mode (320px)" if self.fast_mode else "normal mode (640px)"
-        print(f"Loading YOLO model ({mode_str})...")
-        sys.stdout.flush()
-        self.detector._ensure_initialized()
-        print("YOLO ready!")
+        # Start Hailo or load YOLO
+        if self.use_hailo:
+            print("Starting Hailo inference pipeline...")
+            self.hailo_detector.start()
+            # Wait for first frame
+            time.sleep(2.0)
+        else:
+            # Pre-load YOLO model with loading indicator
+            mode_str = "FAST mode (320px)" if self.fast_mode else "normal mode (640px)"
+            print(f"Loading YOLO model ({mode_str})...")
+            sys.stdout.flush()
+            self.detector._ensure_initialized()
+            print("YOLO ready!")
 
         # Start debug visualizer if enabled
         if self.debug:
@@ -331,7 +356,10 @@ class SpatialObjectTrackerHRTF:
             self.player.stop()
             self.player = None
 
-        if self._own_camera:
+        if self.use_hailo and self.hailo_detector:
+            self.hailo_detector.stop()
+
+        if self._own_camera and self.camera:
             self.camera.release()
 
         print("HRTF Spatial tracking stopped")
@@ -341,13 +369,34 @@ class SpatialObjectTrackerHRTF:
         frame_count = 0
         while self._running:
             try:
-                image_bytes = self.camera.capture()
-                if image_bytes is None:
-                    time.sleep(self.update_interval)
-                    continue
+                if self.use_hailo:
+                    frame_array, all_detections = self.hailo_detector.get_latest()
+                    if frame_array is None:
+                        time.sleep(self.update_interval)
+                        continue
+                    
+                    # Convert RGB to BGR for display/consistency if needed, 
+                    # but Hailo output was configured specific way. 
+                    # Actually hailo_detector.py converts to BGR.
+                    # We need bytes for DebugVisualizer (it expects bytes -> decode)
+                    # This is a bit inefficient (array -> bytes -> decode).
+                    # We should update visualizer to take array, but for now:
+                    import cv2
+                    success, enc_img = cv2.imencode('.jpg', frame_array)
+                    if success:
+                         image_bytes = enc_img.tobytes()
+                    else:
+                         image_bytes = None
+
+                else:
+                    image_bytes = self.camera.capture()
+                    if image_bytes is None:
+                        time.sleep(self.update_interval)
+                        continue
+
+                    all_detections = self.detector.detect_from_bytes(image_bytes)
 
                 frame_count += 1
-                all_detections = self.detector.detect_from_bytes(image_bytes)
 
                 # Filter by target class
                 if self.target_class:
@@ -417,6 +466,7 @@ def run_demo(
     target_class: Optional[str] = None,
     debug: bool = False,
     fast: bool = False,
+    use_hailo: bool = False,
 ):
     """Run demo with HRTF spatial audio."""
     print("\n" + "=" * 45)
@@ -428,6 +478,8 @@ def run_demo(
     print("  DISTANCE   - louder=close, reverb=far")
     if fast:
         print("\nFAST mode: optimized for Raspberry Pi / smooth tracking")
+    if args.hailo:
+        print("\nHAILO mode: Hardware acceleration enabled")
     if debug:
         print("DEBUG mode: window will show camera + detections")
     print("\nPress Ctrl+C to stop.\n")
@@ -437,6 +489,7 @@ def run_demo(
         target_class=target_class,
         debug=debug,
         fast_mode=fast,
+        use_hailo=use_hailo,
     )
 
     def on_detect(det: Detection):
@@ -515,7 +568,8 @@ Performance tips:
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Show debug window with camera feed and detections")
     parser.add_argument("-f", "--fast", action="store_true",
-                        help="Fast mode: 320px input + class filtering (recommended for Pi)")
+                        help="Fast mode: 320px input + class filtering (recommended for Pi if no Hailo)")
+    parser.add_argument("--hailo", action="store_true", help="Use Hailo AI Hat for acceleration")
 
     args = parser.parse_args()
 
@@ -523,4 +577,4 @@ Performance tips:
         print(f"Audio file not found: {args.audio}")
         sys.exit(1)
 
-    run_demo(args.audio, args.target, args.debug, args.fast)
+    run_demo(args.audio, args.target, args.debug, args.fast, args.hailo)

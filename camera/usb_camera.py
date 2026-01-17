@@ -60,6 +60,11 @@ class USBCamera(CameraCapture):
         if not ret:
             print("Error: Could not read frame from camera")
             return None
+
+        # Some camera mounts (especially on Pi setups) end up physically
+        # upside down. Rotate 180° here so that both the debug view and
+        # the detector see an upright image.
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
         
         # Encode as JPEG
         success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])

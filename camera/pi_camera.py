@@ -27,6 +27,7 @@ import io
 try:
     from picamera2 import Picamera2
     from PIL import Image
+    import numpy as np
     
     cam = Picamera2()
     config = cam.create_still_configuration(
@@ -41,6 +42,10 @@ try:
     
     # Capture
     array = cam.capture_array()
+
+    # Rotate 180 degrees so the image is upright if the camera
+    # is mounted upside down (common on some Pi setups).
+    array = np.rot90(array, 2)
     
     # Convert to JPEG
     image = Image.fromarray(array)
