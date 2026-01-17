@@ -8,6 +8,7 @@ This is the main integration module that:
 4. Provides audio feedback so a blind user knows where objects are
 """
 
+import os
 import time
 import threading
 from typing import Optional, Callable
@@ -57,8 +58,16 @@ class SpatialObjectTracker:
 
         # Camera setup
         if camera is None:
-            from camera.usb_camera import USBCamera
-            self.camera = USBCamera()
+            camera_type = os.getenv("CAMERA_TYPE", "usb").lower()
+
+            if camera_type == "pi":
+                from camera.pi_camera import PiCamera
+                self.camera = PiCamera()
+            else:
+                from camera.usb_camera import USBCamera
+                camera_index = int(os.getenv("USB_CAMERA_INDEX", 0))
+                self.camera = USBCamera(camera_index)
+
             self._own_camera = True
         else:
             self.camera = camera
