@@ -14,8 +14,15 @@ import threading
 from typing import Optional, Callable
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
 from .object_detector import ObjectDetector, Detection, get_detector
 from .spatial_audio import SpatialAudioPlayer
+
+
+# Load .env so CAMERA_TYPE/USB_CAMERA_INDEX are respected when running this
+# module directly (e.g., `python -m stereomusic.spatial_tracker`).
+load_dotenv()
 
 
 @dataclass

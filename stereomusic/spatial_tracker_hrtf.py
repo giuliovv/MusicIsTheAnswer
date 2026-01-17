@@ -15,8 +15,14 @@ import threading
 from typing import Optional, Callable
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
 # Suppress ALSA warnings before importing audio libraries
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
+
+# Load .env so CAMERA_TYPE/USB_CAMERA_INDEX are respected when running this
+# module directly (e.g., `python -m stereomusic.spatial_tracker_hrtf`).
+load_dotenv()
 
 def _suppress_alsa_errors():
     """Suppress ALSA error messages on Linux."""
