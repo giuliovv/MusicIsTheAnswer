@@ -1,11 +1,9 @@
 """
-Enhanced Spatial Audio with HRTF-like processing and elevation cues.
+Enhanced Spatial Audio using Pyroomacoustics and MIT KEMAR HRTF.
 
-Provides more accurate 3D positioning than simple panning:
-- Interaural Time Difference (ITD): sound arrives at one ear first
-- Interaural Level Difference (ILD): sound is louder in closer ear
-- Elevation cues: frequency filtering to indicate up/down
-- Room acoustics: pyroomacoustics for realistic reverb
+Uses Measured HRTF data (SOFA format) for accurate 3D positioning:
+- Azimuth: Precise ITD and ILD from KEMAR mannequin.
+- Elevation: Spectral cues (pinna notches) from measured data.
 """
 
 from __future__ import annotations
@@ -14,306 +12,252 @@ import sounddevice as sd
 import soundfile as sf
 import threading
 import time
-from typing import Optional
+from typing import Optional, Tuple
+import scipy.signal
+from scipy.spatial import KDTree
+import pyroomacoustics as pra
+import warnings
 
-# Speed of sound and head model
-SPEED_OF_SOUND = 343.0  # m/s
-HEAD_RADIUS = 0.0875    # meters (average human head radius)
+# Suppress pyroomacoustics warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+class SOFALoader:
+    """Singleton to load and cache the SOFA HRTF data."""
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(SOFALoader, cls).__new__(cls)
+                cls._instance._load_data()
+            return cls._instance
+
+    def _load_data(self):
+        print("Loading MIT KEMAR HRTF data...")
+        try:
+            # Download/Get path
+            pra.datasets.download_sofa_files()
+            db = pra.datasets.SOFADatabase()
+            path = db['mit_kemar_normal_pinna']
+            
+            # Load file
+            # open_sofa_file returns a tuple: (data, fs, coords, ... ) or similar depending on version
+            # Based on inspection: data, fs, coords, receivers, _, _
+            sofa_file = pra.sofa.open_sofa_file(path.path)
+            self.data, self.fs, self.coords, self.receivers, _, _ = sofa_file
+            
+            # coords is (3, N) -> (Az, El, Dist)
+            # Transpose for KDTree
+            self.tree = KDTree(self.coords.T)
+            print(f"HRTF Loaded. Samples: {self.data.shape[2]}, FS: {self.fs}Hz, Positions: {self.coords.shape[1]}")
+            
+        except Exception as e:
+            print(f"Error loading HRTF: {e}")
+            raise
+
+    def get_hrir(self, az_rad: float, el_rad: float, target_fs: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get Left/Right HRIR for given azimuth/elevation (radians).
+        Resamples if target_fs differs from HRTF fs.
+        """
+        # MIT KEMAR Coords (Available range based on inspection: Az 0..6.2, El 0..2.3, Dist 1.4)
+        # We assume input Azimuth is 0..2pi (Standard Spherical)
+        # We assume input Elevation is 0..pi (Colatitude)
+        
+        # 1.4 is the fixed distance in the dataset
+        dist = 1.4
+        
+        # Query nearest
+        d, idx = self.tree.query([az_rad, el_rad, dist])
+        
+        # Get Impulse Responses: Shape (N_meas, 2, N_samples)
+        ir_left = self.data[idx, 0, :]
+        ir_right = self.data[idx, 1, :]
+        
+        # Resample if needed
+        if target_fs != self.fs:
+            num_samples = int(len(ir_left) * target_fs / self.fs)
+            ir_left = scipy.signal.resample(ir_left, num_samples)
+            ir_right = scipy.signal.resample(ir_right, num_samples)
+            
+        return ir_left, ir_right
 
 
 class HRTFSpatialPlayer:
-    """
-    Spatial audio player with HRTF-like processing.
-
-    Position is specified as:
-    - azimuth: -1.0 (full left) to 1.0 (full right)
-    - elevation: -1.0 (below) to 1.0 (above)
-    - distance: 1.0 (close) to 5.0 (far)
-    """
-
     def __init__(self, audio_file: str):
         """Load an audio file for spatial playback."""
+        # Load Audio
         self.data, self.samplerate = sf.read(audio_file, dtype='float32')
 
-        # Convert to mono for clean spatial positioning
-        if len(self.data.shape) == 1:
-            self.mono = self.data
-        else:
+        # Convert to mono
+        if len(self.data.shape) > 1:
             self.mono = np.mean(self.data, axis=1)
+        else:
+            self.mono = self.data
 
-        # Spatial parameters
+        # Load HRTF Data
+        self.hrtf_loader = SOFALoader()
+        
+        # State
         self.azimuth = 0.0      # -1.0 (left) to 1.0 (right)
         self.elevation = 0.0   # -1.0 (below) to 1.0 (above)
-        self.distance = 1.0    # 1.0 (close) to 5.0+ (far)
-
+        self.distance = 1.0    # meters
+        
         self.playing = False
         self.loop = False
         self._current_frame = 0
         self._stream = None
         self._lock = threading.Lock()
-
-        # Processing state
-        self._itd_buffer_left = np.zeros(100, dtype=np.float32)
-        self._itd_buffer_right = np.zeros(100, dtype=np.float32)
-        self._itd_write_pos = 0
-
-        # Filters for elevation (simple IIR state)
-        self._lpf_state_l = 0.0
-        self._lpf_state_r = 0.0
-        self._hpf_state_l = 0.0
-        self._hpf_state_r = 0.0
-
-        # Reverb delay lines
-        self._reverb_buffer = np.zeros((int(self.samplerate * 0.1), 2), dtype=np.float32)
-        self._reverb_pos = 0
+        
+        # Convolution State (Overlap-Add)
+        # We process in chunks. To do continuous convolution, we need to handle the "tail"
+        # Since HRIR changes, we'll do:
+        # 1. Convolve current chunk with current HRIR
+        # 2. Add overlap from previous chunk
+        # 3. Save new overlap
+        # This is strictly "Overlap-Add" but with time-varying filter.
+        # Ideally we cross-fade filters, but switching per chunk (20ms) is usually okayish if changes are smooth.
+        
+        self.overlap_left = np.zeros(2048, dtype=np.float32) # Enough for resampled HRIR
+        self.overlap_right = np.zeros(2048, dtype=np.float32)
 
     def set_position(self, azimuth: float, elevation: float = 0.0):
         """
         Set spatial position.
-
-        Args:
-            azimuth: -1.0 (full left) to 1.0 (full right)
-            elevation: -1.0 (below) to 1.0 (above)
+        azimuth: -1.0 (left) to 1.0 (right)
+        elevation: -1.0 (down) to 1.0 (up)
         """
         with self._lock:
             self.azimuth = max(-1.0, min(1.0, azimuth))
             self.elevation = max(-1.0, min(1.0, elevation))
 
     def set_distance(self, d: float):
-        """Set distance: 1.0 = close, larger = farther."""
         with self._lock:
-            self.distance = max(0.5, d)
+            self.distance = max(0.2, d)
 
-    def _calculate_itd_samples(self, azimuth: float) -> tuple[int, int]:
+    def _map_coordinates(self, az: float, el: float) -> Tuple[float, float]:
         """
-        Calculate Interaural Time Difference in samples.
-
-        Sound reaches the closer ear first. Max ITD is ~0.7ms for sounds
-        directly to the side.
+        Map logical coords (-1..1) to SOFA Spherical Coords (radians).
+        
+        Logic:
+        Input Az: 0=Center, -1=Left, 1=Right
+        SOFA Az: 0=Front, pi/2=Left, 3pi/2=Right (Counter-Clockwise)
+        Wait, usually Azimuth is CCW.
+        Front (0 deg) -> 0 rad
+        Left (90 deg) -> PI/2 rad (Positive Azimuth)
+        Right (-90 deg) -> 3PI/2 rad (or -PI/2)
+        
+        Our Input:
+        0 -> 0
+        -1 (Left) -> PI/2
+        1 (Right) -> 3PI/2 (270 deg)
+        
+        Input El: 0=Horizon, 1=Up, -1=Down
+        SOFA El (Colatitude): 0=Top, pi/2=Horizon, pi=Bottom
+        
+        Mapping El:
+        1 (Up) -> 0
+        0 (Horizon) -> PI/2
+        -1 (Down) -> PI (or max available 2.3)
         """
-        # Azimuth angle in radians (-pi/2 to pi/2)
-        angle = azimuth * (np.pi / 2)
-
-        # Woodworth formula for ITD
-        itd_seconds = (HEAD_RADIUS / SPEED_OF_SOUND) * (np.sin(angle) + angle)
-
-        itd_samples = int(abs(itd_seconds) * self.samplerate)
-        itd_samples = min(itd_samples, 50)  # Cap at ~1ms
-
-        if azimuth > 0:  # Sound from right
-            return (itd_samples, 0)  # Left ear delayed
-        else:  # Sound from left
-            return (0, itd_samples)  # Right ear delayed
-
-    def _calculate_ild(self, azimuth: float) -> tuple[float, float]:
-        """
-        Calculate Interaural Level Difference.
-
-        The ear facing the sound is louder due to head shadow.
-        Effect is frequency-dependent but we use a simple approximation.
-        """
-        # ILD can be up to 20dB for high frequencies
-        # Use ~6dB max for a reasonable effect
-        angle = azimuth * (np.pi / 2)
-
-        # Head shadow approximation
-        shadow = 0.3 * np.sin(angle)  # Max ~6dB difference
-
-        left_gain = 1.0 - max(0, shadow)
-        right_gain = 1.0 + min(0, shadow)
-
-        return (left_gain, right_gain)
-
-    def _apply_elevation_filter(self, left: np.ndarray, right: np.ndarray,
-                                 elevation: float) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Apply strong elevation cues through frequency filtering and pitch perception.
-
-        - Higher elevation: boost high frequencies significantly + slight volume boost
-        - Lower elevation: heavy low-pass filter (very muffled)
-
-        Uses aggressive filtering to make the difference clearly audible.
-        """
-        if abs(elevation) < 0.05:
-            return left, right
-
-        result_left = left.copy()
-        result_right = right.copy()
-
-        if elevation > 0:
-            # HIGH sounds: Brighten significantly
-            # Apply strong high-shelf boost by emphasizing differences
-            strength = elevation  # 0 to 1
-
-            # Strong high-pass emphasis (makes sound "airy" and "above")
-            alpha = 0.3 + 0.5 * strength  # 0.3 to 0.8
-            prev_l, prev_r = self._hpf_state_l, self._hpf_state_r
-
-            for i in range(len(left)):
-                # High-pass: output difference from previous sample
-                hp_l = left[i] - prev_l
-                hp_r = right[i] - prev_r
-                # Mix high-passed signal with original
-                result_left[i] = left[i] + hp_l * alpha * 2.0
-                result_right[i] = right[i] + hp_r * alpha * 2.0
-                prev_l, prev_r = left[i], right[i]
-
-            self._hpf_state_l, self._hpf_state_r = prev_l, prev_r
-
-            # Slight volume boost for "up" (things above feel more present)
-            result_left *= (1.0 + 0.2 * strength)
-            result_right *= (1.0 + 0.2 * strength)
-
+        # Azimuth Mapping
+        if az < 0:
+            # -1 (Left) -> pi/2
+            target_az = abs(az) * (np.pi / 2)
         else:
-            # LOW sounds: Muffle heavily
-            strength = -elevation  # 0 to 1
+            # 1 (Right) -> 3pi/2 (which is -pi/2 effectively)
+            # Linear interpolation 0 -> 0, 1 -> 3pi/2?
+            # No, standard is 0->Front, Right is usually Negative angle or >180.
+            # Let's use 2pi - (az * pi/2)
+            target_az = (2 * np.pi) - (az * np.pi / 2)
+            if target_az >= 2 * np.pi:
+                target_az = 0.0
 
-            # Very aggressive low-pass (makes sound "below" / "underground")
-            # Lower alpha = more muffled
-            alpha = 0.3 - 0.2 * strength  # 0.3 down to 0.1
-            alpha = max(0.1, alpha)
-
-            prev_l, prev_r = self._lpf_state_l, self._lpf_state_r
-
-            for i in range(len(left)):
-                result_left[i] = alpha * left[i] + (1 - alpha) * prev_l
-                result_right[i] = alpha * right[i] + (1 - alpha) * prev_r
-                prev_l, prev_r = result_left[i], result_right[i]
-
-            self._lpf_state_l, self._lpf_state_r = prev_l, prev_r
-
-            # Volume reduction for "down" (things below feel more distant)
-            result_left *= (1.0 - 0.3 * strength)
-            result_right *= (1.0 - 0.3 * strength)
-
-        return result_left, result_right
-
-    def _apply_distance(self, left: np.ndarray, right: np.ndarray,
-                        distance: float) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Apply distance cues:
-        - Volume attenuation (with extra gain so it's clearly audible)
-        - Low-pass filter (air absorption for far sounds)
-        - Extra brightness + presence when very close
-        - Reverb (more reverb = farther)
-        """
-        # Volume attenuation with global gain and a floor so it never gets too quiet
-        base_gain = 1.8  # Global boost so music is clearly audible
-        volume = base_gain / (max(0.5, distance) ** 0.7)  # Gentler than inverse square
-
-        min_volume = 0.25
-        if volume < min_volume:
-            volume = min_volume
-
-        left = left * volume
-        right = right * volume
-
-        # Extra "frequency" / brightness change when very close to the object.
-        # As distance decreases, we emphasize fast changes between samples
-        # (simple high-frequency boost) so close objects sound brighter.
-        if distance <= 2.0:
-            # 0 (far) .. 1 (very close)
-            closeness = max(0.0, min(1.0, 2.0 - distance))
-            # Strength of the high-frequency emphasis
-            alpha = 0.25 + 0.5 * closeness
-
-            prev_l = 0.0
-            prev_r = 0.0
-            for i in range(len(left)):
-                hp_l = left[i] - prev_l
-                hp_r = right[i] - prev_r
-                left[i] = left[i] + hp_l * alpha
-                right[i] = right[i] + hp_r * alpha
-                prev_l, prev_r = left[i], right[i]
-
-        # Air absorption (simple low-pass for distance > 2)
-        if distance > 2:
-            alpha = max(0.3, 1.0 - (distance - 2) * 0.15)
-            for i in range(1, len(left)):
-                left[i] = alpha * left[i] + (1 - alpha) * left[i-1]
-                right[i] = alpha * right[i] + (1 - alpha) * right[i-1]
-
-        # Simple reverb for distance
-        if distance > 1.5:
-            wet = min(0.4, (distance - 1.5) * 0.15)
-            reverb_len = len(self._reverb_buffer)
-
-            for i in range(len(left)):
-                # Read from delay buffer
-                read_pos = (self._reverb_pos + i) % reverb_len
-                reverb_l = self._reverb_buffer[read_pos, 0]
-                reverb_r = self._reverb_buffer[read_pos, 1]
-
-                # Mix
-                left[i] = left[i] * (1 - wet) + reverb_l * wet
-                right[i] = right[i] * (1 - wet) + reverb_r * wet
-
-                # Write to delay buffer with feedback
-                write_pos = (self._reverb_pos + i + int(0.05 * self.samplerate)) % reverb_len
-                self._reverb_buffer[write_pos, 0] = left[i] * 0.3
-                self._reverb_buffer[write_pos, 1] = right[i] * 0.3
-
-            self._reverb_pos = (self._reverb_pos + len(left)) % reverb_len
-
-        return left, right
+        # Elevation Mapping (Colatitude)
+        # 1.0 (Up) -> 0.0
+        # 0.0 (Horizon) -> 1.57 (pi/2)
+        # -1.0 (Down) -> 3.14 (pi)
+        
+        # Linear map: y = mx + c
+        # 1 -> 0
+        # 0 -> 1.57
+        # -1 -> 3.14
+        # Slope = -1.57
+        # y = -1.57 * el + 1.57
+        target_el = (-1.5707 * el) + 1.5707
+        
+        return target_az, target_el
 
     def _apply_spatial(self, chunk: np.ndarray) -> np.ndarray:
-        """Apply full 3D spatial processing."""
         with self._lock:
-            azimuth = self.azimuth
-            elevation = self.elevation
-            distance = self.distance
+            az = self.azimuth
+            el = self.elevation
+            dist = self.distance
+        
+        # 1. Get HRIRs
+        target_az, target_el = self._map_coordinates(az, el)
+        ir_l, ir_r = self.hrtf_loader.get_hrir(target_az, target_el, self.samplerate)
+        
+        # 2. Convolve
+        # Simple Overlap-Add
+        out_l = scipy.signal.convolve(chunk, ir_l, mode='full')
+        out_r = scipy.signal.convolve(chunk, ir_r, mode='full')
+        
+        # Add overlap
+        n_overlap = len(self.overlap_left)
+        out_len = len(out_l)
+        
+        # Extend with overlap if needed (usually out_l is chunk + N - 1)
+        # Ensure overlap buffer is same size as signal tail
+        
+        # Add previous overlap
+        add_len = min(len(out_l), n_overlap)
+        out_l[:add_len] += self.overlap_left[:add_len]
+        out_r[:add_len] += self.overlap_right[:add_len]
+        
+        # Save new overlap for next chunk
+        chunk_size = len(chunk)
+        new_overlap_l = out_l[chunk_size:]
+        new_overlap_r = out_r[chunk_size:]
+        
+        # Update buffer (resize if necessary)
+        self.overlap_left = np.zeros(len(new_overlap_l), dtype=np.float32)
+        self.overlap_left[:] = new_overlap_l
+        
+        self.overlap_right = np.zeros(len(new_overlap_r), dtype=np.float32)
+        self.overlap_right[:] = new_overlap_r
+        
+        # Truncate to chunk size for output
+        out_l = out_l[:chunk_size]
+        out_r = out_r[:chunk_size]
+        
+        # 3. Apply Distance Cues (Volume + Air Absorption)
+        # Make gain change more gradually with distance, but with
+        # a slightly higher base level so the sound feels present.
+        base_gain = 1.8
+        exponent = 0.9
+        gain = base_gain / (max(0.5, dist) ** exponent)
 
-        n = len(chunk)
+        # Keep far sounds quieter, but don't let them disappear.
+        min_gain = 0.2
+        if gain < min_gain:
+            gain = min_gain
 
-        # 1. Calculate ITD (time difference)
-        delay_left, delay_right = self._calculate_itd_samples(azimuth)
-
-        # 2. Calculate ILD (level difference)
-        gain_left, gain_right = self._calculate_ild(azimuth)
-
-        # 3. Apply constant-power panning on top of ILD
-        angle = (azimuth + 1) * np.pi / 4
-        pan_left = np.cos(angle)
-        pan_right = np.sin(angle)
-
-        # Create stereo with ITD
-        left = np.zeros(n, dtype=np.float32)
-        right = np.zeros(n, dtype=np.float32)
-
-        # Apply delays using circular buffer
-        for i in range(n):
-            # Write to buffer
-            self._itd_buffer_left[self._itd_write_pos] = chunk[i]
-            self._itd_buffer_right[self._itd_write_pos] = chunk[i]
-
-            # Read with delay
-            read_left = (self._itd_write_pos - delay_left) % len(self._itd_buffer_left)
-            read_right = (self._itd_write_pos - delay_right) % len(self._itd_buffer_right)
-
-            left[i] = self._itd_buffer_left[read_left]
-            right[i] = self._itd_buffer_right[read_right]
-
-            self._itd_write_pos = (self._itd_write_pos + 1) % len(self._itd_buffer_left)
-
-        # Apply ILD and panning
-        left = left * gain_left * pan_left
-        right = right * gain_right * pan_right
-
-        # 4. Apply elevation filtering
-        left, right = self._apply_elevation_filter(left, right, elevation)
-
-        # 5. Apply distance cues
-        left, right = self._apply_distance(left, right, distance)
-
-        # Combine to stereo
-        result = np.column_stack([left, right])
-        return result
+        # Limit max gain to avoid clipping when very close
+        gain = min(gain, 3.0)
+        
+        out_l *= gain
+        out_r *= gain
+        
+        # Simple Low-Pass for large distances (Air absorption > 20m, but we simulate effect earlier)
+        # For simplicity, we just use gain for now as HRTF already modifies spectrum heavily.
+        
+        return np.column_stack([out_l, out_r])
 
     def _audio_callback(self, outdata, frames, time_info, status):
-        """Callback for sounddevice stream."""
         remaining = len(self.mono) - self._current_frame
-
+        
         if remaining <= 0:
             if self.loop:
                 self._current_frame = 0
@@ -324,34 +268,35 @@ class HRTFSpatialPlayer:
                 raise sd.CallbackStop()
 
         chunk_size = min(frames, remaining)
-        chunk = self.mono[self._current_frame:self._current_frame + chunk_size].copy()
-
-        # Apply spatial processing
-        spatial_chunk = self._apply_spatial(chunk)
-
-        outdata[:chunk_size] = spatial_chunk
+        chunk = self.mono[self._current_frame:self._current_frame + chunk_size]
+        
+        # Process
+        spatial_data = self._apply_spatial(chunk)
+        
+        outdata[:chunk_size] = spatial_data
         outdata[chunk_size:] = 0
-
+        
         self._current_frame += chunk_size
 
     def play(self, loop: bool = False):
-        """Start playing with spatial audio."""
         self.loop = loop
         self._current_frame = 0
         self.playing = True
-
+        
+        # Reset overlap
+        self.overlap_left.fill(0)
+        self.overlap_right.fill(0)
+        
         self._stream = sd.OutputStream(
             samplerate=self.samplerate,
             channels=2,
             callback=self._audio_callback,
             dtype='float32',
-            blocksize=2048,
-            latency='high'
+            blocksize=2048
         )
         self._stream.start()
 
     def stop(self):
-        """Stop playback."""
         self.playing = False
         if self._stream:
             self._stream.stop()
@@ -359,71 +304,59 @@ class HRTFSpatialPlayer:
             self._stream = None
 
     def wait(self):
-        """Wait for playback to finish."""
         while self.playing:
             time.sleep(0.1)
 
-
 def demo():
-    """Demo moving sound in 3D space."""
     import sys
     import os
-
+    
     if len(sys.argv) < 2:
-        audio_file = os.path.join(os.path.dirname(__file__), "test_tone.wav")
+        # Check for default test file
+        default_file = os.path.join(os.path.dirname(__file__), "test_tone.wav")
+        if os.path.exists(default_file):
+            audio_file = default_file
+        else:
+            print("Usage: python spatial_audio_hrtf.py <audio_file>")
+            return
     else:
         audio_file = sys.argv[1]
 
     print(f"Loading: {audio_file}")
     player = HRTFSpatialPlayer(audio_file)
-
-    print("\n=== HRTF Spatial Audio Demo ===")
-    print("Sound will move in 3D space:\n")
-
+    
+    print("\n=== HRTF Spatial Audio Demo (Pyroomacoustics) ===")
+    print("Listen for precise 3D positioning using MIT KEMAR data.\n")
+    
     player.play(loop=True)
-
+    
     try:
-        # Move left to right
-        print("1. Moving LEFT to RIGHT...")
+        # Move Azimuth
+        print("1. Azimuth: Left -> Center -> Right")
         for i in range(50):
             az = -1.0 + (2.0 * i / 49)
             player.set_position(az, 0.0)
-            time.sleep(0.06)
-
-        # Move up and down
-        print("2. Moving DOWN to UP...")
-        player.set_position(0.0, -1.0)
+            print(f"\rAz: {az:.2f}   ", end="")
+            time.sleep(0.1)
+        print()
+            
+        # Move Elevation
+        print("2. Elevation: Up -> Horizon -> Down")
+        player.set_position(0.0, 1.0)
         for i in range(50):
-            el = -1.0 + (2.0 * i / 49)
+            el = 1.0 - (2.0 * i / 49)
             player.set_position(0.0, el)
-            time.sleep(0.06)
-
-        # Circle around
-        print("3. Circling around (azimuth + elevation)...")
-        for i in range(100):
-            angle = 2 * np.pi * i / 100
-            az = np.sin(angle)
-            el = np.cos(angle) * 0.5
-            player.set_position(az, el)
-            time.sleep(0.05)
-
-        # Distance demo
-        print("4. Moving CLOSE to FAR...")
-        player.set_position(0.0, 0.0)
-        for i in range(50):
-            d = 1.0 + (4.0 * i / 49)
-            player.set_distance(d)
-            time.sleep(0.08)
-
-        print("\nDone! Press Ctrl+C to exit.")
+            print(f"\rEl: {el:.2f}   ", end="")
+            time.sleep(0.1)
+        print()
+        
+        print("Done. Press Ctrl+C to stop.")
         while True:
             time.sleep(1)
-
+            
     except KeyboardInterrupt:
         print("\nStopping...")
-    finally:
         player.stop()
-
 
 if __name__ == "__main__":
     demo()

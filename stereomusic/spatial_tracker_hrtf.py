@@ -295,6 +295,10 @@ class SpatialObjectTrackerHRTF:
         self._smooth_el = 0.0
         self._smooth_dist = 3.0
         self._smoothing = 0.5 if fast_mode else 0.3  # Higher = smoother
+        # Distance smoothing separate from x/elevation. Use stronger
+        # smoothing so "near"/"far" transitions feel slower and
+        # less jumpy in loudness.
+        self._dist_smoothing = 0.7 if fast_mode else 0.5
 
     def start(self, loop_audio: bool = True):
         """Start tracking with HRTF spatial audio."""
@@ -431,7 +435,7 @@ class SpatialObjectTrackerHRTF:
                     # Smooth the values
                     self._smooth_x = self._smooth_x * self._smoothing + raw_x * (1 - self._smoothing)
                     self._smooth_el = self._smooth_el * self._smoothing + raw_el * (1 - self._smoothing)
-                    self._smooth_dist = self._smooth_dist * self._smoothing + raw_dist * (1 - self._smoothing)
+                    self._smooth_dist = self._smooth_dist * self._dist_smoothing + raw_dist * (1 - self._dist_smoothing)
 
                     # Update HRTF audio with smoothed values
                     if self.player:
