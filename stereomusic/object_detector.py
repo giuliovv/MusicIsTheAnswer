@@ -55,19 +55,66 @@ class Detection:
 
 
 class ObjectDetector:
-    """YOLO-based object detector."""
+    """YOLO-based object detector with optimization options."""
 
-    def __init__(self, model_name: str = "yolov8n.pt", confidence_threshold: float = 0.5):
+    # Common class IDs for filtering (COCO dataset)
+    COMMON_CLASSES = {
+        'person': 0,
+        'bicycle': 1,
+        'car': 2,
+        'motorcycle': 3,
+        'bus': 5,
+        'truck': 7,
+        'cat': 15,
+        'dog': 16,
+        'backpack': 24,
+        'umbrella': 25,
+        'handbag': 26,
+        'bottle': 39,
+        'cup': 41,
+        'fork': 42,
+        'knife': 43,
+        'spoon': 44,
+        'bowl': 45,
+        'banana': 46,
+        'apple': 47,
+        'chair': 56,
+        'couch': 57,
+        'bed': 59,
+        'laptop': 63,
+        'mouse': 64,
+        'remote': 65,
+        'keyboard': 66,
+        'cell phone': 67,
+        'book': 73,
+        'clock': 74,
+        'scissors': 76,
+        'toothbrush': 79,
+    }
+
+    def __init__(
+        self,
+        model_name: str = "yolov8n.pt",
+        confidence_threshold: float = 0.5,
+        input_size: int = 640,
+        target_classes: Optional[List[str]] = None,
+    ):
         """
         Initialize the detector.
 
         Args:
             model_name: YOLO model to use (yolov8n.pt is smallest/fastest)
             confidence_threshold: Minimum confidence to report detections
+            input_size: Input image size (smaller = faster). Options: 640, 480, 320, 256
+            target_classes: List of class names to detect (None = all). Filtering at
+                           inference is faster than filtering after.
         """
         self.model = None
         self.model_name = model_name
         self.confidence_threshold = confidence_threshold
+        self.input_size = input_size
+        self.target_classes = target_classes
+        self._class_ids = None  # Will be set on init
         self._initialized = False
 
     def _ensure_initialized(self):
@@ -75,8 +122,25 @@ class ObjectDetector:
         if not self._initialized:
             try:
                 from ultralytics import YOLO
-                print(f"Loading YOLO model: {self.model_name}")
+                print(f"Loading YOLO model: {self.model_name} (input size: {self.input_size})")
                 self.model = YOLO(self.model_name)
+
+                # Set up class filtering if target classes specified
+                if self.target_classes:
+                    self._class_ids = []
+                    for cls_name in self.target_classes:
+                        cls_lower = cls_name.lower()
+                        if cls_lower in self.COMMON_CLASSES:
+                            self._class_ids.append(self.COMMON_CLASSES[cls_lower])
+                        else:
+                            # Try to find in model's class names
+                            for idx, name in self.model.names.items():
+                                if name.lower() == cls_lower:
+                                    self._class_ids.append(idx)
+                                    break
+                    if self._class_ids:
+                        print(f"Filtering to classes: {self.target_classes} (IDs: {self._class_ids})")
+
                 self._initialized = True
                 print("YOLO model loaded successfully")
             except ImportError:
@@ -119,8 +183,19 @@ class ObjectDetector:
 
         height, width = frame.shape[:2]
 
+        # Build inference kwargs
+        kwargs = {
+            'verbose': False,
+            'conf': self.confidence_threshold,
+            'imgsz': self.input_size,
+        }
+
+        # Add class filtering if set (faster than filtering after)
+        if self._class_ids:
+            kwargs['classes'] = self._class_ids
+
         # Run inference
-        results = self.model(frame, verbose=False, conf=self.confidence_threshold)
+        results = self.model(frame, **kwargs)
 
         detections = []
         for result in results:
@@ -167,12 +242,38 @@ class ObjectDetector:
 _detector: Optional[ObjectDetector] = None
 
 
-def get_detector(model_name: str = "yolov8n.pt") -> ObjectDetector:
+def get_detector(
+    model_name: str = "yolov8n.pt",
+    input_size: int = 640,
+    target_classes: Optional[List[str]] = None,
+) -> ObjectDetector:
     """Get or create the singleton detector instance."""
     global _detector
     if _detector is None:
-        _detector = ObjectDetector(model_name)
+        _detector = ObjectDetector(
+            model_name=model_name,
+            input_size=input_size,
+            target_classes=target_classes,
+        )
     return _detector
+
+
+def create_fast_detector(target_class: Optional[str] = None) -> ObjectDetector:
+    """
+    Create a fast detector optimized for real-time tracking.
+
+    Uses:
+    - Smaller input size (320 instead of 640)
+    - Class filtering at inference time
+    - Lower confidence threshold for smoother tracking
+    """
+    target_classes = [target_class] if target_class else None
+    return ObjectDetector(
+        model_name="yolov8n.pt",
+        confidence_threshold=0.4,
+        input_size=320,  # Much faster than 640
+        target_classes=target_classes,
+    )
 
 
 if __name__ == "__main__":

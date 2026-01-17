@@ -40,7 +40,7 @@ def _suppress_alsa_errors():
 
 _suppress_alsa_errors()
 
-from .object_detector import ObjectDetector, Detection, get_detector
+from .object_detector import ObjectDetector, Detection, get_detector, create_fast_detector
 from .spatial_audio_hrtf import HRTFSpatialPlayer
 
 
@@ -192,11 +192,34 @@ class SpatialObjectTrackerHRTF:
         target_class: Optional[str] = None,
         detector: Optional[ObjectDetector] = None,
         debug: bool = False,
+        fast_mode: bool = False,
     ):
+        """
+        Initialize the tracker.
+
+        Args:
+            audio_file: Audio file to play spatially
+            camera: Camera instance or None to use USB camera
+            target_class: Object class to track (e.g., 'person', 'cell phone')
+            detector: Custom detector or None to create default
+            debug: Show debug window with camera feed
+            fast_mode: Use optimizations for smoother performance:
+                      - Smaller input resolution (320 vs 640)
+                      - Class filtering at inference
+                      - Frame skipping with position interpolation
+        """
         self.audio_file = audio_file
         self.target_class = target_class
-        self.detector = detector or get_detector()
         self.debug = debug
+        self.fast_mode = fast_mode
+
+        # Create detector - use fast version if fast_mode enabled
+        if detector:
+            self.detector = detector
+        elif fast_mode:
+            self.detector = create_fast_detector(target_class)
+        else:
+            self.detector = get_detector()
 
         # Camera setup
         if camera is None:
@@ -222,15 +245,15 @@ class SpatialObjectTrackerHRTF:
         self.on_detection: Optional[Callable[[Detection], None]] = None
         self.on_lost: Optional[Callable[[], None]] = None
 
-        # Settings
-        self.update_interval = 0.1
+        # Settings - faster in fast_mode
+        self.update_interval = 0.05 if fast_mode else 0.1
         self.lost_timeout = 0.5
 
-        # Smoothing for position (reduces jitter)
+        # Smoothing for position (reduces jitter) - more smoothing in fast mode
         self._smooth_x = 0.0
         self._smooth_el = 0.0
         self._smooth_dist = 3.0
-        self._smoothing = 0.3  # 0 = no smoothing, 1 = very smooth
+        self._smoothing = 0.5 if fast_mode else 0.3  # Higher = smoother
 
     def start(self, loop_audio: bool = True):
         """Start tracking with HRTF spatial audio."""
@@ -250,7 +273,8 @@ class SpatialObjectTrackerHRTF:
         self.player.set_distance(5.0)  # Start quiet
 
         # Pre-load YOLO model with loading indicator
-        print("Loading YOLO model (first time may download)...")
+        mode_str = "FAST mode (320px)" if self.fast_mode else "normal mode (640px)"
+        print(f"Loading YOLO model ({mode_str})...")
         sys.stdout.flush()
         self.detector._ensure_initialized()
         print("YOLO ready!")
@@ -365,7 +389,12 @@ class SpatialObjectTrackerHRTF:
         return None
 
 
-def run_demo(audio_file: str, target_class: Optional[str] = None, debug: bool = False):
+def run_demo(
+    audio_file: str,
+    target_class: Optional[str] = None,
+    debug: bool = False,
+    fast: bool = False,
+):
     """Run demo with HRTF spatial audio."""
     print("\n" + "=" * 45)
     print("  HRTF Spatial Object Tracker")
@@ -374,14 +403,17 @@ def run_demo(audio_file: str, target_class: Optional[str] = None, debug: bool = 
     print("  LEFT/RIGHT - sound pans to object position")
     print("  UP/DOWN    - bright=high, muffled=low")
     print("  DISTANCE   - louder=close, reverb=far")
+    if fast:
+        print("\nFAST mode: optimized for Raspberry Pi / smooth tracking")
     if debug:
-        print("\nDebug mode: window will show camera + detections")
+        print("DEBUG mode: window will show camera + detections")
     print("\nPress Ctrl+C to stop.\n")
 
     tracker = SpatialObjectTrackerHRTF(
         audio_file=audio_file,
         target_class=target_class,
         debug=debug,
+        fast_mode=fast,
     )
 
     def on_detect(det: Detection):
@@ -441,10 +473,16 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m stereomusic.spatial_tracker_hrtf                     # Track any object
-  python -m stereomusic.spatial_tracker_hrtf -t person           # Track only people
-  python -m stereomusic.spatial_tracker_hrtf -t "cell phone" -d  # Track phones with debug view
-  python -m stereomusic.spatial_tracker_hrtf music.wav -d        # Custom audio with debug
+  python -m stereomusic.spatial_tracker_hrtf                       # Track any object
+  python -m stereomusic.spatial_tracker_hrtf -t person             # Track only people
+  python -m stereomusic.spatial_tracker_hrtf -t person -f          # Fast mode (for Pi)
+  python -m stereomusic.spatial_tracker_hrtf -t "cell phone" -d    # Debug view
+  python -m stereomusic.spatial_tracker_hrtf -t person -f -d       # Fast + debug
+
+Performance tips:
+  - Use -f (fast mode) for Raspberry Pi or smoother tracking
+  - Use -t to specify target class (faster than detecting all)
+  - Fast mode uses 320px input (vs 640px normal) = ~4x faster
         """
     )
     parser.add_argument("audio", nargs="?", default=default_audio,
@@ -453,6 +491,8 @@ Examples:
                         help="Target object class to track (e.g., 'person', 'cell phone')")
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Show debug window with camera feed and detections")
+    parser.add_argument("-f", "--fast", action="store_true",
+                        help="Fast mode: 320px input + class filtering (recommended for Pi)")
 
     args = parser.parse_args()
 
@@ -460,4 +500,4 @@ Examples:
         print(f"Audio file not found: {args.audio}")
         sys.exit(1)
 
-    run_demo(args.audio, args.target, args.debug)
+    run_demo(args.audio, args.target, args.debug, args.fast)

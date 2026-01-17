@@ -11,6 +11,6 @@ Modules:
 
 from .spatial_audio import SpatialAudioPlayer
 from .spatial_audio_hrtf import HRTFSpatialPlayer
-from .object_detector import ObjectDetector, Detection, get_detector
+from .object_detector import ObjectDetector, Detection, get_detector, create_fast_detector
 from .spatial_tracker import SpatialObjectTracker
 from .spatial_tracker_hrtf import SpatialObjectTrackerHRTF

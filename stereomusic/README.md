@@ -20,8 +20,11 @@ python -m stereomusic.spatial_tracker
 Track a specific object type (e.g. only track your phone):
 
 ```bash
-python -m stereomusic.spatial_tracker stereomusic/test_tone.wav "cell phone"
+python -m stereomusic.spatial_tracker_hrtf -t "cup" -f
+
 ```
+
+`-f` is for fast mode, will downsize and use only the object
 
 Run the test suite:
 
