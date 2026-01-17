@@ -147,17 +147,17 @@ pcm.!default {
     type asym
     playback.pcm {
         type plug
-        slave.pcm "hw:3,0"
+        slave.pcm "hw:2,0"
     }
     capture.pcm {
         type plug
-        slave.pcm "hw:3,0"
+        slave.pcm "hw:2,0"
     }
 }
 
 ctl.!default {
     type hw
-    card 3
+    card 2
 }
 EOF
 ```
@@ -166,7 +166,7 @@ EOF
 
 Test audio output:
 ```bash
-speaker-test -c 2 -t wav -D hw:3,0
+speaker-test -c 2 -t wav -D hw:2,0
 ```
 
 You should hear "Front Left, Front Right" in your headphones. Press Ctrl+C to stop.
