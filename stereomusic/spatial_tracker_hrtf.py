@@ -17,17 +17,28 @@ from dataclasses import dataclass
 
 # Suppress ALSA warnings before importing audio libraries
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
-# Redirect ALSA errors to /dev/null
-try:
-    from ctypes import CDLL, c_char_p, c_int
-    ERROR_HANDLER_FUNC = lambda *args: None
+
+def _suppress_alsa_errors():
+    """Suppress ALSA error messages on Linux."""
     try:
+        from ctypes import CDLL, CFUNCTYPE, c_char_p, c_int
+        # Define the error handler function type
+        ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+
+        def py_error_handler(filename, line, function, err, fmt):
+            pass  # Suppress all ALSA errors
+
+        c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+
         asound = CDLL('libasound.so.2')
-        asound.snd_lib_error_set_handler(ERROR_HANDLER_FUNC)
-    except OSError:
-        pass  # ALSA not available (not Linux or no ALSA)
-except Exception:
-    pass
+        asound.snd_lib_error_set_handler(c_error_handler)
+
+        # Keep reference to prevent garbage collection
+        _suppress_alsa_errors._handler = c_error_handler
+    except Exception:
+        pass  # Not on Linux or ALSA not available
+
+_suppress_alsa_errors()
 
 from .object_detector import ObjectDetector, Detection, get_detector
 from .spatial_audio_hrtf import HRTFSpatialPlayer
