@@ -26,3 +26,5 @@ python-dotenv>=1.0.0
 # 1. It must be installed via apt (sudo apt install python3-picamera2)
 # 2. It requires libcamera which is a system library
 # 3. Our code calls system Python via subprocess for Pi Camera operations
+numpy>=1.24.0
+soundfile
