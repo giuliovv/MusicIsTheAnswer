@@ -46,12 +46,27 @@ class Detection:
         Larger objects are assumed to be closer.
         Returns: 1.0 (very close) to 5.0 (far away)
         """
-        # Use area as proxy for distance
-        # Large area (>0.3) = close, small area (<0.02) = far
-        area = max(0.001, self.area)
-        # Inverse relationship: bigger = closer
-        distance = 1.0 / (area * 10 + 0.2)
-        return max(1.0, min(5.0, distance))
+        # Use area as proxy for distance, but map it through
+        # a clamped, roughly linear curve so small jitters in
+        # the YOLO box size don't flip "closer" to "farther".
+
+        # Clamp area into a reasonable range for typical objects
+        # in the frame. Very tiny boxes (<0.5% of image) are
+        # treated as "far", very large boxes (>25%) as "very close".
+        area = max(0.0005, float(self.area))
+        min_area = 0.005   # ~0.5% of image -> far
+        max_area = 0.25    # 25% of image   -> very close
+
+        if area <= min_area:
+            closeness = 0.0
+        elif area >= max_area:
+            closeness = 1.0
+        else:
+            closeness = (area - min_area) / (max_area - min_area)
+
+        # Map closeness (0 = far, 1 = close) to distance 5..1
+        distance = 5.0 - 4.0 * closeness
+        return distance
 
 
 class ObjectDetector:
