@@ -13,3 +13,7 @@
 If you want to test just the audio without tracking first:
 
   python -m stereomusic.spatial_audio_hrtf
+
+
+Test HRTF version (with better spatial clues)
+python -m stereomusic.spatial_tracker_hrtf stereomusic/test_tone.wav person
