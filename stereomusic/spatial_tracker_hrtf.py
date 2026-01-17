@@ -376,9 +376,13 @@ class SpatialObjectTrackerHRTF:
                     self.tracked = TrackedObject(detection=best, last_seen=now)
                     tracked_det = best
 
-                    if not self._audio_started and self.player:
-                        self.player.play(loop=self._loop_audio)
-                        self._audio_started = True
+                    if self.player:
+                        if not self._audio_started:
+                            self.player.play(loop=self._loop_audio)
+                            self._audio_started = True
+                        elif not self.player.playing:
+                            # Resume if paused
+                            self.player.resume()
 
                     # Spatial Audio Logic
                     raw_x = best.spatial_x
@@ -401,7 +405,7 @@ class SpatialObjectTrackerHRTF:
                     if now - self.tracked.last_seen > self.lost_timeout:
                         self.tracked = None
                         if self.player:
-                            self.player.set_distance(5.0)
+                            self.player.pause()
                         if self.on_lost:
                             self.on_lost()
                 
