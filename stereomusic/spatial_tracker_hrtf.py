@@ -14,6 +14,10 @@ import time
 import threading
 from typing import Optional, Callable
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+# Load environment variables (e.g. CAMERA_TYPE)
+load_dotenv()
 
 # Suppress ALSA warnings before importing audio libraries
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
@@ -223,7 +227,18 @@ class SpatialObjectTrackerHRTF:
 
         # Camera setup
         if camera is None:
-            camera_type = os.getenv("CAMERA_TYPE", "usb").lower()
+            camera_type = os.getenv("CAMERA_TYPE")
+
+            # Auto-detect if not specified
+            if not camera_type:
+                try:
+                    from camera.pi_camera import PiCamera
+                    if PiCamera().is_available():
+                        camera_type = "pi"
+                except Exception:
+                    pass
+            
+            camera_type = (camera_type or "usb").lower()
 
             if camera_type == "pi":
                 from camera.pi_camera import PiCamera
