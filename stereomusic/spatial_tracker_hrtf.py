@@ -51,6 +51,130 @@ class TrackedObject:
     last_seen: float
 
 
+class DebugVisualizer:
+    """Shows camera feed with detection overlay."""
+
+    def __init__(self):
+        self._frame = None
+        self._detections = []
+        self._target_class = None
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread = None
+
+    def start(self, target_class: Optional[str] = None):
+        """Start the debug window."""
+        import cv2
+        self._target_class = target_class
+        self._running = True
+        self._thread = threading.Thread(target=self._display_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Stop the debug window."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        try:
+            import cv2
+            cv2.destroyAllWindows()
+        except:
+            pass
+
+    def update(self, frame_bytes: bytes, detections: list, tracked_detection=None):
+        """Update the display with new frame and detections."""
+        import cv2
+        import numpy as np
+
+        # Decode frame
+        nparr = np.frombuffer(frame_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return
+
+        with self._lock:
+            self._frame = frame.copy()
+            self._detections = detections
+            self._tracked = tracked_detection
+
+    def _display_loop(self):
+        """Main display loop."""
+        import cv2
+
+        cv2.namedWindow('Spatial Tracker Debug', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Spatial Tracker Debug', 800, 600)
+
+        while self._running:
+            with self._lock:
+                if self._frame is None:
+                    time.sleep(0.03)
+                    continue
+                frame = self._frame.copy()
+                detections = self._detections.copy()
+                tracked = getattr(self, '_tracked', None)
+
+            h, w = frame.shape[:2]
+
+            # Draw crosshair at center
+            cv2.line(frame, (w//2 - 20, h//2), (w//2 + 20, h//2), (100, 100, 100), 1)
+            cv2.line(frame, (w//2, h//2 - 20), (w//2, h//2 + 20), (100, 100, 100), 1)
+
+            # Draw all detections
+            for det in detections:
+                # Calculate box coordinates
+                x1 = int((det.x_center - det.width/2) * w)
+                y1 = int((det.y_center - det.height/2) * h)
+                x2 = int((det.x_center + det.width/2) * w)
+                y2 = int((det.y_center + det.height/2) * h)
+
+                # Color: green if tracked, gray if not target class
+                is_target = (self._target_class is None or
+                            det.class_name.lower() == self._target_class.lower())
+                is_tracked = tracked and det.class_name == tracked.class_name
+
+                if is_tracked:
+                    color = (0, 255, 0)  # Green for tracked
+                    thickness = 2
+                elif is_target:
+                    color = (0, 255, 255)  # Yellow for target class
+                    thickness = 1
+                else:
+                    color = (128, 128, 128)  # Gray for other
+                    thickness = 1
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+
+                # Label
+                label = f"{det.class_name} {det.confidence:.0%}"
+                cv2.putText(frame, label, (x1, y1 - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+                # Position info for tracked object
+                if is_tracked:
+                    # Spatial position
+                    lr = "L" if det.spatial_x < -0.2 else "R" if det.spatial_x > 0.2 else "C"
+                    ud = "UP" if det.spatial_elevation > 0.2 else "DN" if det.spatial_elevation < -0.2 else "MID"
+                    pos_text = f"[{lr}] [{ud}] dist:{det.estimated_distance:.1f}"
+                    cv2.putText(frame, pos_text, (x1, y2 + 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+            # Show tracking status
+            status = f"Tracking: {self._target_class or 'any'}"
+            cv2.putText(frame, status, (10, 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+            cv2.imshow('Spatial Tracker Debug', frame)
+
+            # Check for quit (q or ESC)
+            key = cv2.waitKey(30) & 0xFF
+            if key == ord('q') or key == 27:
+                self._running = False
+                break
+
+        cv2.destroyAllWindows()
+
+
 class SpatialObjectTrackerHRTF:
     """
     Enhanced tracker using HRTF-based spatial audio.
@@ -67,10 +191,12 @@ class SpatialObjectTrackerHRTF:
         camera=None,
         target_class: Optional[str] = None,
         detector: Optional[ObjectDetector] = None,
+        debug: bool = False,
     ):
         self.audio_file = audio_file
         self.target_class = target_class
         self.detector = detector or get_detector()
+        self.debug = debug
 
         # Camera setup
         if camera is None:
@@ -83,6 +209,9 @@ class SpatialObjectTrackerHRTF:
 
         # Audio player (HRTF version)
         self.player: Optional[HRTFSpatialPlayer] = None
+
+        # Debug visualizer
+        self._visualizer: Optional[DebugVisualizer] = None
 
         # Tracking state
         self.tracked: Optional[TrackedObject] = None
@@ -126,6 +255,12 @@ class SpatialObjectTrackerHRTF:
         self.detector._ensure_initialized()
         print("YOLO ready!")
 
+        # Start debug visualizer if enabled
+        if self.debug:
+            self._visualizer = DebugVisualizer()
+            self._visualizer.start(self.target_class)
+            print("Debug window opened (press 'q' to close)")
+
         self._running = True
         self._thread = threading.Thread(target=self._tracking_loop, daemon=True)
         self._thread.start()
@@ -136,6 +271,10 @@ class SpatialObjectTrackerHRTF:
     def stop(self):
         """Stop tracking and audio."""
         self._running = False
+
+        if self._visualizer:
+            self._visualizer.stop()
+            self._visualizer = None
 
         if self._thread:
             self._thread.join(timeout=1.0)
@@ -161,16 +300,23 @@ class SpatialObjectTrackerHRTF:
                     continue
 
                 frame_count += 1
-                detections = self.detector.detect_from_bytes(image_bytes)
+                all_detections = self.detector.detect_from_bytes(image_bytes)
 
                 # Filter by target class
                 if self.target_class:
                     detections = [
-                        d for d in detections
+                        d for d in all_detections
                         if d.class_name.lower() == self.target_class.lower()
                     ]
+                else:
+                    detections = all_detections
 
                 now = time.time()
+
+                # Update debug visualizer with all detections
+                if self._visualizer:
+                    tracked_det = detections[0] if detections else None
+                    self._visualizer.update(image_bytes, all_detections, tracked_det)
 
                 if detections:
                     best = detections[0]
@@ -219,7 +365,7 @@ class SpatialObjectTrackerHRTF:
         return None
 
 
-def run_demo(audio_file: str, target_class: Optional[str] = None):
+def run_demo(audio_file: str, target_class: Optional[str] = None, debug: bool = False):
     """Run demo with HRTF spatial audio."""
     print("\n" + "=" * 45)
     print("  HRTF Spatial Object Tracker")
@@ -228,11 +374,14 @@ def run_demo(audio_file: str, target_class: Optional[str] = None):
     print("  LEFT/RIGHT - sound pans to object position")
     print("  UP/DOWN    - bright=high, muffled=low")
     print("  DISTANCE   - louder=close, reverb=far")
+    if debug:
+        print("\nDebug mode: window will show camera + detections")
     print("\nPress Ctrl+C to stop.\n")
 
     tracker = SpatialObjectTrackerHRTF(
         audio_file=audio_file,
         target_class=target_class,
+        debug=debug,
     )
 
     def on_detect(det: Detection):
@@ -283,13 +432,32 @@ def run_demo(audio_file: str, target_class: Optional[str] = None):
 
 
 if __name__ == "__main__":
+    import argparse
+
     default_audio = os.path.join(os.path.dirname(__file__), "test_tone.wav")
 
-    audio_file = sys.argv[1] if len(sys.argv) >= 2 else default_audio
-    target = sys.argv[2] if len(sys.argv) >= 3 else None
+    parser = argparse.ArgumentParser(
+        description="Spatial Object Tracker with HRTF 3D audio",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python -m stereomusic.spatial_tracker_hrtf                     # Track any object
+  python -m stereomusic.spatial_tracker_hrtf -t person           # Track only people
+  python -m stereomusic.spatial_tracker_hrtf -t "cell phone" -d  # Track phones with debug view
+  python -m stereomusic.spatial_tracker_hrtf music.wav -d        # Custom audio with debug
+        """
+    )
+    parser.add_argument("audio", nargs="?", default=default_audio,
+                        help="Audio file to play (default: test_tone.wav)")
+    parser.add_argument("-t", "--target", default=None,
+                        help="Target object class to track (e.g., 'person', 'cell phone')")
+    parser.add_argument("-d", "--debug", action="store_true",
+                        help="Show debug window with camera feed and detections")
 
-    if not os.path.exists(audio_file):
-        print(f"Audio file not found: {audio_file}")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.audio):
+        print(f"Audio file not found: {args.audio}")
         sys.exit(1)
 
-    run_demo(audio_file, target)
+    run_demo(args.audio, args.target, args.debug)

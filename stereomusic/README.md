@@ -1,19 +1,52 @@
-  Full interactive demo (audio follows objects):
-  source .venv_spatial/bin/activate
-  python -m stereomusic.spatial_tracker
+# StereoMusic
 
-  Track a specific object type (e.g., only track your phone):
-  python -m stereomusic.spatial_tracker stereomusic/test_tone.wav "cell phone"
+Spatial audio demos that pan sound based on detected objects in the camera feed.
 
-  Run test suite:
-  python test_spatial_tracking.py
+## Requirements
 
-  The audio will play from the direction where objects are detected - move an object left/right and you'll hear the sound pan. Closer objects will be louder.
+- Python 3.10+
+- Virtualenv with project dependencies installed
+- A webcam and audio output device
 
-If you want to test just the audio without tracking first:
+## Quick start
 
-  python -m stereomusic.spatial_audio_hrtf
+```bash
+source .venv_spatial/bin/activate
+python -m stereomusic.spatial_tracker
+```
 
+## Usage
 
-Test HRTF version (with better spatial clues)
+Track a specific object type (e.g. only track your phone):
+
+```bash
+python -m stereomusic.spatial_tracker stereomusic/test_tone.wav "cell phone"
+```
+
+Run the test suite:
+
+```bash
+python test_spatial_tracking.py
+```
+
+Audio-only test (no tracking):
+
+```bash
+python -m stereomusic.spatial_audio_hrtf
+```
+
+HRTF version (stronger spatial cues):
+
+```bash
 python -m stereomusic.spatial_tracker_hrtf stereomusic/test_tone.wav person
+```
+
+Run with debug window:
+
+```bash
+python -m stereomusic.spatial_tracker_hrtf -t "cell phone" -d
+```
+
+## How it feels
+
+The audio pans left/right based on object position in the frame, and gets louder as the object gets closer.
