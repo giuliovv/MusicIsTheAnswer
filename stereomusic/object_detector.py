@@ -30,6 +30,16 @@ class Detection:
         return (self.x_center - 0.5) * 2.0
 
     @property
+    def spatial_elevation(self) -> float:
+        """
+        Convert y position to elevation: -1.0 (below) to 1.0 (above).
+
+        Note: In image coordinates, y=0 is top, y=1 is bottom.
+        We invert this so objects at top of frame are "above" (positive elevation).
+        """
+        return (0.5 - self.y_center) * 2.0
+
+    @property
     def estimated_distance(self) -> float:
         """
         Estimate distance based on bounding box size.

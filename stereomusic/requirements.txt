@@ -2,6 +2,7 @@
 numpy
 sounddevice
 soundfile
+pyroomacoustics  # Enhanced room acoustics (optional, for future use)
 
 # Object detection
 ultralytics  # YOLO v8

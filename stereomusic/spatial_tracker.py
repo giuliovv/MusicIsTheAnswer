@@ -122,35 +122,23 @@ class SpatialObjectTracker:
 
     def _tracking_loop(self):
         """Main tracking loop running in background thread."""
-        frame_count = 0
         while self._running:
             try:
                 # Capture frame
                 image_bytes = self.camera.capture()
                 if image_bytes is None:
-                    print("[DEBUG] Camera capture returned None")
                     time.sleep(self.update_interval)
                     continue
-
-                frame_count += 1
-                if frame_count == 1:
-                    print(f"[DEBUG] First frame captured: {len(image_bytes)} bytes")
 
                 # Detect objects
                 detections = self.detector.detect_from_bytes(image_bytes)
 
-                if frame_count <= 3:
-                    print(f"[DEBUG] Frame {frame_count}: {len(detections)} detections")
-
                 # Filter by target class if specified
                 if self.target_class:
-                    all_classes = [d.class_name for d in detections]
                     detections = [
                         d for d in detections
                         if d.class_name.lower() == self.target_class.lower()
                     ]
-                    if frame_count <= 3:
-                        print(f"[DEBUG] Classes found: {all_classes}, after filter: {len(detections)}")
 
                 # Update tracking
                 now = time.time()

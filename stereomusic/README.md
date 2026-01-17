@@ -9,3 +9,7 @@
   python test_spatial_tracking.py
 
   The audio will play from the direction where objects are detected - move an object left/right and you'll hear the sound pan. Closer objects will be louder.
+
+If you want to test just the audio without tracking first:
+
+  python -m stereomusic.spatial_audio_hrtf
