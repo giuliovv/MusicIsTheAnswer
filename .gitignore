@@ -8,9 +8,13 @@ __pycache__/
 *.so
 .Python
 .venv/
+.venv_spatial/
 venv/
 ENV/
 env/
+
+# YOLO is large
+yolov8n.pt
 
 # Wake word training
 hotword_refs/

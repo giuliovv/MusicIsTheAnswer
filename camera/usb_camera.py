@@ -3,8 +3,9 @@ USB Camera implementation using OpenCV.
 Works with any standard USB webcam.
 """
 
+from __future__ import annotations  # Python 3.8 compatibility
 import cv2
-from typing import Optional
+from typing import Optional, List
 from .base import CameraCapture
 
 
