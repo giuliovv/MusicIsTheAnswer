@@ -11,8 +11,9 @@ from __future__ import annotations
 import os
 import sys
 import time
+import signal
 import threading
-from typing import Optional, Callable, Union
+from typing import Optional, Callable, Union, Tuple, List
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
@@ -61,137 +62,134 @@ class TrackedObject:
 
 
 class DebugVisualizer:
-    """Shows camera feed with detection overlay."""
+    """Shows camera feed with detection overlay (Main Thread Only)."""
 
-    def __init__(self):
-        self._frame = None
-        self._detections = []
-        self._target_class = None
-        self._lock = threading.Lock()
-        self._running = False
-        self._thread = None
-
-    def start(self, target_class: Optional[str] = None):
-        """Start the debug window."""
-        import cv2
+    def __init__(self, target_class: Optional[str] = None):
         self._target_class = target_class
-        self._running = True
-        self._thread = threading.Thread(target=self._display_loop, daemon=True)
-        self._thread.start()
+        self._window_created = False
+        self._window_name = 'Spatial Tracker Debug'
 
-    def stop(self):
-        """Stop the debug window."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=1.0)
-        try:
+    def init_window(self):
+        """Create the window (must be called from main thread)."""
+        if not self._window_created:
             import cv2
-            cv2.destroyAllWindows()
-        except:
-            pass
+            cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self._window_name, 800, 600)
+            self._window_created = True
 
-    def update(self, frame_bytes: bytes, detections: list, tracked_detection=None):
-        """Update the display with new frame and detections."""
+    def close(self):
+        """Close the window."""
+        if self._window_created:
+            import cv2
+            try:
+                cv2.destroyWindow(self._window_name)
+            except Exception:
+                pass
+            self._window_created = False
+
+    def update_and_show(self, frame_data, detections: list, tracked_detection=None) -> bool:
+        """
+        Update the display and process UI events.
+        Target class is highlighted.
+        frame_data can be bytes (JPEG) or numpy array (BGR).
+        Returns False if user requested quit (q/ESC), True otherwise.
+        """
         import cv2
         import numpy as np
 
-        # Decode frame
-        nparr = np.frombuffer(frame_bytes, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if not self._window_created:
+            self.init_window()
+
+        if frame_data is None:
+            # Just pump events
+            key = cv2.waitKey(10) & 0xFF
+            return not (key == ord('q') or key == 27)
+
+        # Handle both numpy array and bytes input
+        if isinstance(frame_data, np.ndarray):
+            frame = frame_data.copy()
+            # Debug: log first frame info
+            if not hasattr(self, '_first_display_logged'):
+                self._first_display_logged = True
+                print(f"Visualizer received numpy array: shape={frame.shape}, "
+                      f"dtype={frame.dtype}, min={frame.min()}, max={frame.max()}")
+        else:
+            # Decode from JPEG bytes
+            nparr = np.frombuffer(frame_data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
-            return
+            key = cv2.waitKey(10) & 0xFF
+            return not (key == ord('q') or key == 27)
 
-        with self._lock:
-            self._frame = frame.copy()
-            self._detections = detections
-            self._tracked = tracked_detection
+        h, w = frame.shape[:2]
 
-    def _display_loop(self):
-        """Main display loop."""
-        import cv2
+        # Draw crosshair at center
+        cv2.line(frame, (w//2 - 20, h//2), (w//2 + 20, h//2), (100, 100, 100), 1)
+        cv2.line(frame, (w//2, h//2 - 20), (w//2, h//2 + 20), (100, 100, 100), 1)
 
-        cv2.namedWindow('Spatial Tracker Debug', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Spatial Tracker Debug', 800, 600)
+        # Draw all detections
+        for det in detections:
+            # Calculate box coordinates
+            x1 = int((det.x_center - det.width/2) * w)
+            y1 = int((det.y_center - det.height/2) * h)
+            x2 = int((det.x_center + det.width/2) * w)
+            y2 = int((det.y_center + det.height/2) * h)
 
-        while self._running:
-            with self._lock:
-                if self._frame is None:
-                    time.sleep(0.03)
-                    continue
-                frame = self._frame.copy()
-                detections = self._detections.copy()
-                tracked = getattr(self, '_tracked', None)
+            # Color: green if tracked, gray if not target class
+            is_target = (self._target_class is None or
+                        det.class_name.lower() == self._target_class.lower())
+            is_tracked = tracked_detection and det.class_name == tracked_detection.class_name
 
-            h, w = frame.shape[:2]
+            if is_tracked:
+                color = (0, 255, 0)  # Green for tracked
+                thickness = 2
+            elif is_target:
+                color = (0, 255, 255)  # Yellow for target class
+                thickness = 1
+            else:
+                color = (128, 128, 128)  # Gray for other
+                thickness = 1
 
-            # Draw crosshair at center
-            cv2.line(frame, (w//2 - 20, h//2), (w//2 + 20, h//2), (100, 100, 100), 1)
-            cv2.line(frame, (w//2, h//2 - 20), (w//2, h//2 + 20), (100, 100, 100), 1)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
-            # Draw all detections
-            for det in detections:
-                # Calculate box coordinates
-                x1 = int((det.x_center - det.width/2) * w)
-                y1 = int((det.y_center - det.height/2) * h)
-                x2 = int((det.x_center + det.width/2) * w)
-                y2 = int((det.y_center + det.height/2) * h)
+            # Label: class, confidence, and estimated distance
+            label = f"{det.class_name} {det.confidence:.0%} d={det.estimated_distance:.1f}"
+            cv2.putText(frame, label, (x1, y1 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-                # Color: green if tracked, gray if not target class
-                is_target = (self._target_class is None or
-                            det.class_name.lower() == self._target_class.lower())
-                is_tracked = tracked and det.class_name == tracked.class_name
-
-                if is_tracked:
-                    color = (0, 255, 0)  # Green for tracked
-                    thickness = 2
-                elif is_target:
-                    color = (0, 255, 255)  # Yellow for target class
-                    thickness = 1
-                else:
-                    color = (128, 128, 128)  # Gray for other
-                    thickness = 1
-
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-
-                # Label
-                label = f"{det.class_name} {det.confidence:.0%}"
-                cv2.putText(frame, label, (x1, y1 - 5),
+            # Position info for tracked object
+            if is_tracked:
+                # Spatial position
+                lr = "L" if det.spatial_x < -0.2 else "R" if det.spatial_x > 0.2 else "C"
+                ud = "UP" if det.spatial_elevation > 0.2 else "DN" if det.spatial_elevation < -0.2 else "MID"
+                pos_text = f"[{lr}] [{ud}] dist:{det.estimated_distance:.1f}"
+                cv2.putText(frame, pos_text, (x1, y2 + 15),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-                # Position info for tracked object
-                if is_tracked:
-                    # Spatial position
-                    lr = "L" if det.spatial_x < -0.2 else "R" if det.spatial_x > 0.2 else "C"
-                    ud = "UP" if det.spatial_elevation > 0.2 else "DN" if det.spatial_elevation < -0.2 else "MID"
-                    pos_text = f"[{lr}] [{ud}] dist:{det.estimated_distance:.1f}"
-                    cv2.putText(frame, pos_text, (x1, y2 + 15),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        # Show tracking status
+        status = f"Tracking: {self._target_class or 'any'}"
+        cv2.putText(frame, status, (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-            # Show tracking status
-            status = f"Tracking: {self._target_class or 'any'}"
-            cv2.putText(frame, status, (10, 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        # Debug: log before imshow
+        if not hasattr(self, '_imshow_logged'):
+            self._imshow_logged = True
+            print(f"About to imshow: frame shape={frame.shape}, dtype={frame.dtype}")
 
-            cv2.imshow('Spatial Tracker Debug', frame)
+        cv2.imshow(self._window_name, frame)
 
-            # Check for quit (q or ESC)
-            key = cv2.waitKey(30) & 0xFF
-            if key == ord('q') or key == 27:
-                self._running = False
-                break
+        # Check for quit (q or ESC)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q') or key == 27:
+            return False
 
-        cv2.destroyAllWindows()
+        return True
 
 
 class SpatialObjectTrackerHRTF:
     """
     Enhanced tracker using HRTF-based spatial audio.
-
-    Provides more accurate 3D positioning than the basic tracker:
-    - Horizontal: ITD + ILD for precise left/right
-    - Vertical: Frequency cues for up/down
-    - Depth: Reverb + filtering for distance
     """
 
     def __init__(
@@ -204,18 +202,6 @@ class SpatialObjectTrackerHRTF:
         fast_mode: bool = False,
         use_hailo: bool = False,
     ):
-        """
-        Initialize the tracker.
-
-        Args:
-            audio_file: Audio file to play spatially
-            camera: Camera instance or None to use USB camera
-            target_class: Object class to track (e.g., 'person', 'cell phone')
-            detector: Custom detector or None to create default
-            debug: Show debug window with camera feed
-            fast_mode: Use optimizations for smoother performance
-            use_hailo: Use Hailo AI Hat for acceleration
-        """
         self.audio_file = audio_file
         self.target_class = target_class
         self.debug = debug
@@ -228,14 +214,12 @@ class SpatialObjectTrackerHRTF:
 
         if self.use_hailo:
             print("Initializing Hailo AI acceleration...")
-            # HailoObjectDetector auto-detects device type and selects appropriate HEF
             self.hailo_detector = HailoObjectDetector()
-            self.camera = None  # Hailo handles camera
+            self.camera = None
             self._own_camera = False
             self.detector = None
         else:
             self.hailo_detector = None
-            # Create detector - use fast version if fast_mode enabled
             if detector:
                 self.detector = detector
             elif fast_mode:
@@ -246,8 +230,6 @@ class SpatialObjectTrackerHRTF:
             # Camera setup
             if camera is None:
                 camera_type = os.getenv("CAMERA_TYPE")
-
-                # Auto-detect if not specified
                 if not camera_type:
                     try:
                         from camera.pi_camera import PiCamera
@@ -257,7 +239,6 @@ class SpatialObjectTrackerHRTF:
                         pass
                 
                 camera_type = (camera_type or "usb").lower()
-
                 if camera_type == "pi":
                     from camera.pi_camera import PiCamera
                     self.camera = PiCamera()
@@ -271,37 +252,30 @@ class SpatialObjectTrackerHRTF:
                 self.camera = camera
                 self._own_camera = False
 
-        # Audio player (HRTF version)
         self.player: Optional[HRTFSpatialPlayer] = None
-
-        # Debug visualizer
-        self._visualizer: Optional[DebugVisualizer] = None
-
-        # Tracking state
         self.tracked: Optional[TrackedObject] = None
+        
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
-        # Callbacks
         self.on_detection: Optional[Callable[[Detection], None]] = None
         self.on_lost: Optional[Callable[[], None]] = None
 
-        # Settings - faster in fast_mode
         self.update_interval = 0.05 if fast_mode else 0.1
         self.lost_timeout = 0.5
 
-        # Smoothing for position (reduces jitter) - more smoothing in fast mode
         self._smooth_x = 0.0
         self._smooth_el = 0.0
         self._smooth_dist = 3.0
-        self._smoothing = 0.5 if fast_mode else 0.3  # Higher = smoother
-        # Distance smoothing separate from x/elevation. Use stronger
-        # smoothing so "near"/"far" transitions feel slower and
-        # less jumpy in loudness.
+        self._smoothing = 0.5 if fast_mode else 0.3
         self._dist_smoothing = 0.7 if fast_mode else 0.5
 
+        # Thread-safe storage for debug visualizer (frame can be bytes or numpy array)
+        self._debug_lock = threading.Lock()
+        self._latest_debug_data: Optional[Tuple[Union[bytes, "np.ndarray"], List[Detection], Optional[Detection]]] = None
+
     def start(self, loop_audio: bool = True):
-        """Start tracking with HRTF spatial audio."""
+        """Start tracking."""
         if self._running:
             return
 
@@ -311,31 +285,21 @@ class SpatialObjectTrackerHRTF:
         self._loop_audio = loop_audio
         self._audio_started = False
 
-        # Pre-load audio file (but don't play yet)
         print("Loading audio file...")
         self.player = HRTFSpatialPlayer(self.audio_file)
         self.player.set_position(0.0, 0.0)
-        self.player.set_distance(5.0)  # Start quiet
+        self.player.set_distance(5.0)
 
-        # Start Hailo or load YOLO
         if self.use_hailo:
             print("Starting Hailo inference pipeline...")
             self.hailo_detector.start()
-            # Wait for first frame
             time.sleep(2.0)
         else:
-            # Pre-load YOLO model with loading indicator
             mode_str = "FAST mode (320px)" if self.fast_mode else "normal mode (640px)"
             print(f"Loading YOLO model ({mode_str})...")
             sys.stdout.flush()
             self.detector._ensure_initialized()
             print("YOLO ready!")
-
-        # Start debug visualizer if enabled
-        if self.debug:
-            self._visualizer = DebugVisualizer()
-            self._visualizer.start(self.target_class)
-            print("Debug window opened (press 'q' to close)")
 
         self._running = True
         self._thread = threading.Thread(target=self._tracking_loop, daemon=True)
@@ -345,13 +309,8 @@ class SpatialObjectTrackerHRTF:
         print("(Audio starts when object detected)\n")
 
     def stop(self):
-        """Stop tracking and audio."""
+        """Stop tracking."""
         self._running = False
-
-        if self._visualizer:
-            self._visualizer.stop()
-            self._visualizer = None
-
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
@@ -365,12 +324,19 @@ class SpatialObjectTrackerHRTF:
 
         if self._own_camera and self.camera:
             self.camera.release()
-
+            
         print("HRTF Spatial tracking stopped")
 
+    def get_debug_data(self):
+        """Get latest data for debug display (called from main thread).
+        Returns tuple of (frame_data, detections, tracked_detection) or None.
+        frame_data can be bytes (JPEG) or numpy array (BGR).
+        """
+        with self._debug_lock:
+            return self._latest_debug_data
+
     def _tracking_loop(self):
-        """Main tracking loop."""
-        frame_count = 0
+        """Main tracking loop (runs in background thread)."""
         while self._running:
             try:
                 if self.use_hailo:
@@ -378,29 +344,19 @@ class SpatialObjectTrackerHRTF:
                     if frame_array is None:
                         time.sleep(self.update_interval)
                         continue
-                    
-                    # Convert RGB to BGR for display/consistency if needed, 
-                    # but Hailo output was configured specific way. 
-                    # Actually hailo_detector.py converts to BGR.
-                    # We need bytes for DebugVisualizer (it expects bytes -> decode)
-                    # This is a bit inefficient (array -> bytes -> decode).
-                    # We should update visualizer to take array, but for now:
-                    import cv2
-                    success, enc_img = cv2.imencode('.jpg', frame_array)
-                    if success:
-                         image_bytes = enc_img.tobytes()
-                    else:
-                         image_bytes = None
-
+                    # Pass numpy array directly - visualizer handles both types
+                    frame_data = frame_array.copy()
+                    # Debug: log first frame in tracking loop
+                    if not hasattr(self, '_first_track_frame_logged'):
+                        self._first_track_frame_logged = True
+                        print(f"Tracking loop got frame: shape={frame_data.shape}, "
+                              f"min={frame_data.min()}, max={frame_data.max()}")
                 else:
-                    image_bytes = self.camera.capture()
-                    if image_bytes is None:
+                    frame_data = self.camera.capture()
+                    if frame_data is None:
                         time.sleep(self.update_interval)
                         continue
-
-                    all_detections = self.detector.detect_from_bytes(image_bytes)
-
-                frame_count += 1
+                    all_detections = self.detector.detect_from_bytes(frame_data)
 
                 # Filter by target class
                 if self.target_class:
@@ -412,32 +368,27 @@ class SpatialObjectTrackerHRTF:
                     detections = all_detections
 
                 now = time.time()
-
-                # Update debug visualizer with all detections
-                if self._visualizer:
-                    tracked_det = detections[0] if detections else None
-                    self._visualizer.update(image_bytes, all_detections, tracked_det)
-
+                
+                # Update tracked object
+                tracked_det = None
                 if detections:
                     best = detections[0]
                     self.tracked = TrackedObject(detection=best, last_seen=now)
+                    tracked_det = best
 
-                    # Start audio on first detection
                     if not self._audio_started and self.player:
                         self.player.play(loop=self._loop_audio)
                         self._audio_started = True
 
-                    # Get raw positions
+                    # Spatial Audio Logic
                     raw_x = best.spatial_x
                     raw_el = best.spatial_elevation
                     raw_dist = best.estimated_distance
 
-                    # Smooth the values
                     self._smooth_x = self._smooth_x * self._smoothing + raw_x * (1 - self._smoothing)
                     self._smooth_el = self._smooth_el * self._smoothing + raw_el * (1 - self._smoothing)
                     self._smooth_dist = self._smooth_dist * self._dist_smoothing + raw_dist * (1 - self._dist_smoothing)
 
-                    # Update HRTF audio with smoothed values
                     if self.player:
                         self.player.set_position(self._smooth_x, self._smooth_el)
                         self.player.set_distance(self._smooth_dist)
@@ -446,12 +397,18 @@ class SpatialObjectTrackerHRTF:
                         self.on_detection(best)
 
                 elif self.tracked:
+                    # Lost logic
                     if now - self.tracked.last_seen > self.lost_timeout:
                         self.tracked = None
                         if self.player:
-                            self.player.set_distance(5.0)  # Fade out
+                            self.player.set_distance(5.0)
                         if self.on_lost:
                             self.on_lost()
+                
+                # Store data for debug visualizer
+                if self.debug and frame_data is not None:
+                    with self._debug_lock:
+                        self._latest_debug_data = (frame_data, all_detections, tracked_det)
 
             except Exception as e:
                 print(f"Tracking error: {e}")
@@ -459,7 +416,6 @@ class SpatialObjectTrackerHRTF:
             time.sleep(self.update_interval)
 
     def get_current_detection(self) -> Optional[Detection]:
-        """Get the currently tracked detection."""
         if self.tracked:
             return self.tracked.detection
         return None
@@ -482,11 +438,17 @@ def run_demo(
     print("  DISTANCE   - louder=close, reverb=far")
     if fast:
         print("\nFAST mode: optimized for Raspberry Pi / smooth tracking")
-    if args.hailo:
+    if use_hailo:
         print("\nHAILO mode: Hardware acceleration enabled")
     if debug:
         print("DEBUG mode: window will show camera + detections")
-    print("\nPress Ctrl+C to stop.\n")
+    print("\nPress Ctrl+C or 'q' to stop.\n")
+
+    # Create visualizer BEFORE tracker to avoid Qt/GLib threading conflicts
+    visualizer = None
+    if debug:
+        visualizer = DebugVisualizer(target_class)
+        visualizer.init_window()  # Create window before GLib main loop starts
 
     tracker = SpatialObjectTrackerHRTF(
         audio_file=audio_file,
@@ -496,51 +458,58 @@ def run_demo(
         use_hailo=use_hailo,
     )
 
+    # Flag for clean shutdown
+    shutdown_requested = threading.Event()
+
+    def signal_handler(signum, frame):
+        """Handle Ctrl+C gracefully."""
+        print("\n\nShutdown requested...")
+        shutdown_requested.set()
+
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     def on_detect(det: Detection):
-        # More detailed position info
-        if det.spatial_x < -0.5:
-            lr = "FAR LEFT"
-        elif det.spatial_x < -0.2:
-            lr = "LEFT"
-        elif det.spatial_x > 0.5:
-            lr = "FAR RIGHT"
-        elif det.spatial_x > 0.2:
-            lr = "RIGHT"
-        else:
-            lr = "CENTER"
-
-        if det.spatial_elevation > 0.3:
-            ud = "HIGH"
-        elif det.spatial_elevation < -0.3:
-            ud = "LOW"
-        else:
-            ud = "MID"
-
-        if det.estimated_distance < 1.5:
-            dist = "very close"
-        elif det.estimated_distance < 2.5:
-            dist = "close"
-        elif det.estimated_distance < 3.5:
-            dist = "medium"
-        else:
-            dist = "far"
-
-        print(f"\r[{det.class_name}] {lr} {ud} ({dist})          ", end="", flush=True)
+        pass  # Let visualizer handle UI
 
     def on_lost():
-        print("\r[searching...]                    ", end="", flush=True)
+        pass
 
     tracker.on_detection = on_detect
     tracker.on_lost = on_lost
 
     try:
         tracker.start()
-        while True:
-            time.sleep(0.5)
+
+        # Main thread loop
+        _main_loop_debug_logged = False
+        while not shutdown_requested.is_set():
+            if debug and visualizer:
+                # Get latest data from tracker
+                data = tracker.get_debug_data()
+                if data:
+                    frame_data, dets, tracked = data
+                    if not _main_loop_debug_logged:
+                        _main_loop_debug_logged = True
+                        print(f"Main loop got data: frame_data type={type(frame_data)}, "
+                              f"shape={frame_data.shape if hasattr(frame_data, 'shape') else 'N/A'}")
+                    keep_running = visualizer.update_and_show(frame_data, dets, tracked)
+                else:
+                    keep_running = visualizer.update_and_show(None, [], None)
+
+                if not keep_running:
+                    break
+            else:
+                # No GUI, just sleep but check shutdown flag
+                shutdown_requested.wait(timeout=0.5)
+
     except KeyboardInterrupt:
         print("\n\nStopping...")
     finally:
         tracker.stop()
+        if visualizer:
+            visualizer.close()
 
 
 if __name__ == "__main__":
