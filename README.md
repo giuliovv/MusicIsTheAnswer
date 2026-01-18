@@ -1,428 +1,251 @@
-# Cash Recognition Voice Assistant
+# 🎧 Spatial Audio Object Detection for the Blind
 
-A voice-activated assistant for Raspberry Pi that helps blind and visually impaired users identify banknotes.
+**Winner of the EF x Raspberry Pi x Asteroid Accessibility Hackathon (17 January 2025)**
 
-**Say "Hey Pi" → Ask about your money → Get spoken feedback**
+A real-time spatial awareness system that helps blind and visually impaired users understand their surroundings through **3D audio positioning**. Objects are detected via on-device AI and represented as stereo sounds that originate from their actual location in space.
 
-## Features
+## The Problem
 
-- 🎤 **Wake word activation** - Say "Hey Pi" to start
-- 💬 **Natural conversation** - Chat with the assistant powered by ElevenLabs
-- 📷 **Camera recognition** - Identifies banknotes using Google Gemini AI
-- 🔊 **Voice output** - Clear spoken responses via headphones
-- 💷 **Multi-currency** - Works with British Pounds, Euros, US Dollars, and more
+Existing solutions for blind users have critical limitations:
 
-## Hardware Required
+**Traditional LLM approach:**
+- Camera → LLM → "There's a cup on your left, a phone to your right, and keys in the center"
+- **Mental overload**: User must parse verbal descriptions and mentally map positions
+- **Slow**: Waiting for full sentence descriptions
+- **Overlapping voices**: Multiple objects create confusing audio clutter
+- **Not instinctive**: Requires conscious processing of language
 
-| Item | Notes |
-|------|-------|
-| **Raspberry Pi 5** | Pi 4 also works, but Pi 5 recommended |
-| **Micro SD Card** | 32GB+ recommended |
-| **USB-C Power Supply** | 27W for Pi 5 (official PSU recommended) |
-| **Camera** | USB webcam (e.g., Logitech C920) OR **Raspberry Pi Camera Module 3** (recommended) |
-| **USB Headphones with Mic** | USB-C or USB-A headphones with built-in microphone |
-| **USB-C to USB-A Adapter** | If using USB-A peripherals with Pi 5 |
+**Our solution:**
+- Camera → YOLO → Positioned audio beeps
+- **Intuitive**: Brain processes spatial audio instantly, no thinking required
+- **Fast**: Immediate perception of surroundings
+- **Parallel**: Multiple objects heard simultaneously without confusion
+- **Natural**: Like hearing sounds in the real world
 
-> **Pi Camera Note**: If using Pi Camera Module 3 with Pi 5, you'll need the 22-pin adapter cable (often included in the box) since Pi 5 uses a smaller camera connector than Pi 4.
+The difference is like reading turn-by-turn directions versus using GPS with map visualization—one requires mental processing, the other is immediate understanding.
 
-### Optional
-- HDMI cable + monitor (for initial troubleshooting only)
-- Raspberry Pi AI HAT+ (for future local inference)
+## Our Solution
 
-## Complete Setup Guide
+We use **spatial audio instead of verbal descriptions** to represent object positions:
 
-### Step 1: Flash Raspberry Pi OS
+1. **Camera captures the scene** → YOLOv8n detects objects and positions on-device
+2. **Position mapped to stereo field** → Left/right pan based on horizontal position
+3. **Sound plays from object's location** → User hears where each object actually is
+4. **Natural spatial understanding** → Brain processes 3D audio instinctively
 
-1. **Download** [Raspberry Pi Imager](https://www.raspberrypi.com/software/) on your computer
-2. Insert your **Micro SD card** (you may need a Micro SD → SD adapter for your computer)
-3. Open Raspberry Pi Imager and:
-   - **Choose Device**: Raspberry Pi 5
-   - **Choose OS**: Raspberry Pi OS (64-bit)
-   - **Choose Storage**: Your SD card
-4. Click the **⚙️ gear icon** (or "Edit Settings") and configure:
-   - ✅ Set hostname: Choose a name (e.g., `raspberrypi` or `mypi`)
-   - ✅ Set username and password: **Write these down!**
-   - ✅ Configure WiFi: Enter your network name and password
-   - ✅ Enable SSH: Use password authentication
-5. Click **Save**, then **Write**
-6. Wait for write + verification to complete
+**Key innovation**: You can still have a conversation while receiving spatial information. The audio cues provide continuous spatial awareness without interrupting dialogue or requiring you to parse complex verbal descriptions. Less mental load, more natural interaction.
 
-### Step 2: First Boot
+## Why Spatial Audio > Voice Descriptions
 
-1. **Insert** the SD card into your Raspberry Pi
-2. **Connect** power (USB-C)
-3. **Wait** 2-3 minutes for first boot to complete
-4. The green LED should blink occasionally (activity)
+### Traditional LLM Camera Approach
+```
+User: "What do you see?"
+Assistant: "I see a coffee mug on your left, about 30 degrees, 
+           a laptop directly in front of you, 
+           and your phone on the right side, near the edge of the table,
+           and keys slightly to the left of center..."
 
-### Step 3: Connect via SSH
+Problems:
+❌ Must wait for full description
+❌ Mental processing required to map positions
+❌ Can't have conversation while describing
+❌ Multiple objects = long, confusing descriptions
+❌ High cognitive load
+```
 
-On your computer (Mac/Windows/Linux), open a terminal:
+### Our Spatial Audio Approach
+```
+[Beep from left] [Beep from center] [Beep from right] [Beep from center-left]
 
+User: "Hey, where did I put my keys?"
+[While talking, user hears beep from center-left]
+User: *reaches toward the sound*
+
+Advantages:
+✅ Instant perception
+✅ No mental translation needed
+✅ Can talk while perceiving space
+✅ Multiple objects heard simultaneously without confusion
+✅ Zero cognitive load - just like hearing in real life
+```
+
+### The Key Insight
+**Music doesn't interrupt conversation.** You can have a normal dialogue while the spatial audio provides continuous environmental awareness—like background music that carries information. With voice descriptions, you have to stop and listen to each object enumeration.
+
+## How It Works
+
+### Real-Time Detection
+Point the camera at your environment and the system:
+- Detects objects using YOLOv8n running on Raspberry Pi AI HAT
+- Calculates bounding box positions in the camera frame
+- Maps objects to normalized stereo field
+- Generates positioned audio for each detected object
+
+### Spatial Audio Engine
+The system:
+- Detects objects using YOLOv8n on Raspberry Pi AI HAT
+- Calculates normalized positions from bounding boxes (x: -1 to +1)
+- Generates stereo audio with position-based panning
+- Plays distinct sounds for each object
+- Provides real-time spatial feedback
+
+### Example Experience
+```
+[Camera detects objects on table]
+[Beep sound from left side] - Coffee mug detected on left
+[Different beep from right side] - Phone detected on right
+[Center beep] - Laptop detected straight ahead
+```
+
+The user instinctively knows the spatial layout from audio positioning alone.
+
+## Technical Implementation
+
+### Architecture
+```
+┌─────────────────┐
+│  Pi Camera 3    │ → Captures scene at 30fps
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│  YOLOv8n on     │ → Detects objects + bounding boxes
+│  Raspberry Pi   │   (runs on AI HAT accelerator)
+│  AI HAT         │
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│   Spatial       │ → Maps bbox position → stereo field
+│   Audio         │   Generates positioned sound
+│ (pyroomacoustics)│
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│   Headphones    │ → User hears 3D soundscape
+└─────────────────┘
+```
+
+### Key Components
+- **Object detection**: YOLOv8n optimized for Hailo AI accelerator
+- **Hardware acceleration**: Hailo-8L AI accelerator (13 TOPS) on Raspberry Pi AI HAT
+- **Vision**: Raspberry Pi Camera Module 3
+- **Spatial audio**: pyroomacoustics for acoustic simulation and stereo positioning
+- **Audio output**: PyAudio for low-latency stereo playback
+- **Hardware**: Raspberry Pi 5 + AI HAT + Camera Module 3 + USB headphones
+
+### Stereo Panning Algorithm
+```python
+def bbox_to_stereo(bbox, frame_width):
+    """
+    Maps object bounding box to stereo field
+    bbox: (x_min, y_min, x_max, y_max) from YOLO
+    frame_width: camera frame width in pixels
+    """
+    # Calculate center of bounding box
+    x_center = (bbox[0] + bbox[2]) / 2
+    
+    # Normalize to -1 (left) to +1 (right)
+    x_normalized = (x_center / frame_width) * 2 - 1
+    
+    # Pan calculation for stereo field
+    left_gain = (1 - x_normalized) / 2
+    right_gain = (1 + x_normalized) / 2
+    
+    return left_gain, right_gain
+```
+
+## Hardware Requirements
+
+| Component | Purpose | Notes |
+|-----------|---------|-------|
+| **Raspberry Pi 5** | Main compute | Required for AI HAT compatibility |
+| **Raspberry Pi AI HAT** | AI acceleration | Hailo-8L accelerator (13 TOPS) |
+| **Camera Module 3** | Scene capture | USB webcam also supported |
+| **USB Headphones** | Stereo audio output | Must have separate L/R channels |
+
+**Note**: The AI HAT is essential for running YOLOv8n at usable framerates (30fps). Without hardware acceleration, performance would be too slow for real-time feedback.
+
+## Setup
+
+See the main [README.md](../README.md) for complete Raspberry Pi setup instructions.
+
+### Quick Start for Spatial Audio
 ```bash
-ssh youruser@yourhostname.local
-```
-
-Replace `youruser` and `yourhostname` with the values you set. Enter your password when prompted.
-
-> **Troubleshooting**: If connection fails, wait another minute. If still failing, connect an HDMI monitor to see what's happening.
-
-### Step 4: Copy the Project Files
-
-On your **computer** (not the Pi), clone or download this repo, then copy it to the Pi:
-
-```bash
-# Clone the repo (on your computer)
-git clone https://github.com/yourusername/AccessibilityHackathon.git
-
-# Copy to Pi
-scp -r AccessibilityHackathon youruser@yourhostname.local:~/
-```
-
-Or if you already have the folder:
-```bash
-scp -r /path/to/AccessibilityHackathon youruser@yourhostname.local:~/
-```
-
-### Step 5: Install Python 3.11
-
-> ⚠️ **Important:** Raspberry Pi OS (Debian Trixie) comes with Python 3.13, but the wake word library (`tflite-runtime`) requires Python 3.11. You MUST install Python 3.11 using pyenv.
-
-SSH into your Pi and run:
-
-```bash
-# Install pyenv dependencies
-sudo apt-get update
-sudo apt-get install -y make build-essential libssl-dev zlib1g-dev \
-  libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm \
-  libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
-
-# Install pyenv
-curl https://pyenv.run | bash
-
-# Add pyenv to your shell
-echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.bashrc
-echo 'command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.bashrc
-echo 'eval "$(pyenv init -)"' >> ~/.bashrc
-
-# Reload shell
-source ~/.bashrc
-
-# Install Python 3.11 (takes 5-10 minutes on Pi 5 - be patient!)
-pyenv install 3.11.9
-```
-
-> **Note**: When installing Python, it will appear to hang on "Patching..." - this is normal. Compiling Python takes time. You can check progress with `top` in another terminal.
-
-### Step 6: Run Setup Script
-
-```bash
-cd ~/AccessibilityHackathon
-chmod +x setup_pi.sh
-./setup_pi.sh
-```
-
-This installs all system dependencies and Python packages.
-
-### Step 7: Configure Audio Device
-
-Before running the assistant, you need to configure your USB headphones as the default audio device.
-
-First, check your audio devices:
-```bash
-aplay -l   # List playback devices
-arecord -l # List recording devices
-```
-
-You'll see output like:
-```
-card 3: Audio [AB13X USB Audio], device 0: USB Audio [USB Audio]
-```
-
-Note the card number for your USB headphones (e.g., `3`).
-
-Create the ALSA configuration:
-```bash
-cat > ~/.asoundrc << 'EOF'
-pcm.!default {
-    type asym
-    playback.pcm {
-        type plug
-        slave.pcm "hw:2,0"
-    }
-    capture.pcm {
-        type plug
-        slave.pcm "hw:2,0"
-    }
-}
-
-ctl.!default {
-    type hw
-    card 2
-}
-EOF
-```
-
-> **Important**: Replace `3` with your actual card number if different!
-
-Test audio output:
-```bash
-speaker-test -c 2 -t wav -D hw:2,0
-```
-
-You should hear "Front Left, Front Right" in your headphones. Press Ctrl+C to stop.
-
-### Step 8: Configure API Keys
-
-```bash
-# Create .env from template
-cp env.template .env
-
-# Edit the file
-nano .env
-```
-
-Add your API keys:
-- **ELEVENLABS_API_KEY** - From [elevenlabs.io/app/settings/api-keys](https://elevenlabs.io/app/settings/api-keys)
-- **ELEVENLABS_AGENT_ID** - You'll get this after Step 10
-- **GOOGLE_API_KEY** - From [Google AI Studio](https://aistudio.google.com/app/apikey)
-
-Save with Ctrl+O, Enter, Ctrl+X.
-
-### Step 9: Train Wake Word
-
-The assistant uses a custom wake word to activate. By default, we use **"Hey Pi"**, but **you can choose any phrase you like** (e.g., "Hey Assistant", "Hello Pi", "Cash Helper").
-
-```bash
-source .venv/bin/activate
-python train_wakeword.py
-```
-
-**Option A - Record your own samples:**
-- Record 3+ samples saying your chosen wake phrase
-- Save as WAV files in `hotword_training_audio/`
-- The wake word will be trained from your recordings
-
-**Option B - Use text-to-speech:**
-- The script can generate samples using Google TTS
-
-After training, you'll see: `✅ Wake word trained successfully!`
-
-> **Tip**: Choose a phrase that's easy to say and distinctive. Two-syllable phrases like "Hey Pi" work well because they're short but unique enough to avoid false triggers.
-
-### Step 10: Create ElevenLabs Agent
-
-Follow the detailed guide in [SETUP_AGENT.md](SETUP_AGENT.md).
-
-Quick summary:
-1. Go to [ElevenLabs Agents](https://elevenlabs.io/app/conversational-ai/agents)
-2. Create a new agent with "Blank Template"
-3. Add the system prompt (see SETUP_AGENT.md)
-4. Add the `identify_cash` **Client Tool**
-5. Copy the Agent ID to your `.env` file
-
-### Step 11: Test Components
-
-```bash
+cd ~/MusicIsTheAnswer
 source .venv/bin/activate
 
-# Test camera + Gemini vision
-python test_camera_gemini.py
+# Test spatial positioning
+python stereomusic/test_spatial_tracking.py
 
-# Test full flow (camera → Gemini → speech)
-python test_full_flow.py
-```
-
-### Step 12: Run the Assistant!
-
-```bash
+# Run full assistant with spatial audio
 python main.py
 ```
 
-Say **"Hey Pi"** and then ask: "What banknote am I holding?"
+## Usage
 
-## Project Structure
+### Running the Demo
 
-```
-├── main.py                 # Main application
-├── requirements.txt        # Python dependencies
-├── env.template            # Environment variables template
-├── setup_pi.sh             # Raspberry Pi setup script
-├── SETUP_AGENT.md          # ElevenLabs agent setup guide
-├── train_wakeword.py       # Wake word training script
-├── test_camera_gemini.py   # Camera + Gemini test
-├── test_full_flow.py       # Full flow test
-├── camera/
-│   ├── base.py             # Camera interface
-│   ├── usb_camera.py       # USB camera (OpenCV)
-│   └── pi_camera.py        # Pi Camera 3 (picamera2)
-├── tools/
-│   └── cash_recognition.py # Gemini banknote analysis
-├── hotword_training_audio/ # Wake word training samples
-└── hotword_refs/           # Trained wake word model
-```
-
-## Usage Examples
-
-**Basic usage:**
-> "Hey Pi"  
-> "What money do I have?"  
-> *"I can see a twenty pound note. That's twenty pounds."*
-
-**Checking a single note:**
-> "Hey Pi"  
-> "What's this note?"  
-> *"That's a fifty pound note, the polymer version showing Alan Turing."*
-
-## Troubleshooting
-
-### Python Version Issues
-**Problem**: `ERROR: No matching distribution found for tflite-runtime`
-
-**Solution**: You're using Python 3.13. Install Python 3.11 via pyenv (see Step 5).
-
----
-
-### pyenv Install Stuck on "Patching..."
-**Problem**: `pyenv install 3.11.9` appears frozen
-
-**Solution**: This is normal! Compiling Python on a Pi takes 5-10 minutes. Check it's working with:
-```bash
-ps aux | grep pyenv
-```
-
----
-
-### Audio: "Invalid sample rate" Error
-**Problem**: `OSError: [Errno -9997] Invalid sample rate`
-
-**Solution**: Your USB audio device isn't set as default. Create `~/.asoundrc` (see Step 7).
-
----
-
-### Wake Word: "no wav file found"
-**Problem**: Training fails with "only wav files are supported"
-
-**Solution**: Convert your audio files to WAV:
-```bash
-cd ~/AccessibilityHackathon/hotword_training_audio
-for f in *.mp3 *.m4a; do
-  ffmpeg -i "$f" -ar 16000 -ac 1 "${f%.*}.wav"
-done
-rm *.mp3 *.m4a  # Remove originals
-```
-
----
-
-### USB Camera Not Found
-**Problem**: "Camera not available" error with USB camera
-
-**Solution**:
-1. Check camera is connected: `ls /dev/video*`
-2. Try different USB port (use USB 3.0 blue ports)
-3. Test camera: `ffmpeg -f v4l2 -i /dev/video0 -frames 1 test.jpg`
-
----
-
-### Pi Camera: "Camera frontend has timed out"
-**Problem**: Camera is detected but capture fails with timeout error
-
-**Solution**: This is a **hardware connection issue**:
-1. Power off the Pi completely
-2. Re-seat the ribbon cable on both ends (camera and Pi)
-3. Check orientation: gold contacts face toward the lens (camera) and USB ports (Pi 5)
-4. Make sure clips are **fully closed**
-5. Power on and test: `rpicam-hello -t 5000`
-
----
-
-### Pi Camera: "No module named 'libcamera'"
-**Problem**: picamera2 import fails in your venv
-
-**Solution**: This is expected! The code uses system Python for camera operations:
-1. Make sure system Python has picamera2: `/usr/bin/python3 -c "from picamera2 import Picamera2; print('OK')"`
-2. If that fails: `sudo apt install python3-picamera2`
-3. Our `pi_camera.py` handles this automatically via subprocess
-
----
-
-### Agent Doesn't Use the Tool
-**Problem**: Agent says "I don't have access to tools"
-
-**Solution**: 
-1. Ensure the tool is added as a **Client Tool** (not webhook)
-2. Tool name must be exactly `identify_cash`
-3. Update the System Prompt to mention the tool
-4. Click Save in the ElevenLabs dashboard
-
----
-
-### WebSocket Timeout
-**Problem**: `TimeoutError: timed out while waiting for handshake response`
-
-**Solution**: 
-1. Check internet: `curl -I https://api.elevenlabs.io`
-2. Verify Agent ID is correct
-3. Try again (sometimes temporary)
-
----
-
-### SSH Connection Refused
-**Problem**: Can't connect to Pi via SSH
-
-**Solution**:
-1. Wait 2-3 minutes after first boot
-2. Ensure Pi is on same network: `ping yourhostname.local`
-3. Check SSH was enabled in Raspberry Pi Imager settings
-4. Connect HDMI monitor to see Pi's IP address
-
-## Using Pi Camera 3 (Instead of USB Camera)
-
-The Raspberry Pi Camera Module 3 provides better image quality than USB cameras. Here's how to set it up:
-
-### Hardware Connection (Pi 5)
-
-1. **Power off** your Raspberry Pi completely
-2. **Pi 5 requires an adapter cable** - the camera comes with a standard 15-pin cable, but Pi 5 uses a smaller 22-pin connector:
-   - Disconnect the standard cable from the camera board (lift the black clip, slide cable out)
-   - Connect the 22-pin adapter cable to the camera (gold contacts face the lens)
-   - Connect the other end to the Pi 5's **CAM/DISP 0** port (gold contacts face USB ports)
-3. Make sure both clips are **firmly closed**
-4. Power on the Pi
-
-### Software Setup
+Create a venv and install the requirements then:
 
 ```bash
-# Install picamera2 for system Python (required - don't skip this!)
-sudo apt install -y python3-picamera2
-
-# Install libcap-dev (needed for pip install in venv)
-sudo apt install -y libcap-dev
-
-# Verify camera is detected
-rpicam-hello --list-cameras
-# Should show: "0 : imx708 [4608x2592 ...]"
-
-# Update your .env file
-nano ~/AccessibilityHackathon/.env
-# Change: CAMERA_TYPE=pi
-
-# Test the camera
-cd ~/AccessibilityHackathon
-source .venv/bin/activate
-python test_camera_capture.py
+python -m stereomusic.spatial_tracker_hrtf -t "cup" -f
 ```
 
-> **Note**: On Pi 5 with modern Raspberry Pi OS, the camera is enabled by default - no need to use `raspi-config`.
+The system will:
+1. Initialize the camera and AI HAT
+2. Start real-time object detection
+3. Play positioned audio for each detected object
+4. Continuously update as you move objects or camera
 
-> **Technical Note**: picamera2 requires system Python because it depends on `libcamera` (a C++ library). Our code uses a subprocess approach to call system Python for camera operations while the main app runs in the Python 3.11 venv for wake word compatibility.
+### What You'll Hear
+- **Left side objects**: Sound predominantly in left ear
+- **Right side objects**: Sound predominantly in right ear
+- **Center objects**: Balanced sound in both ears
+- **Multiple objects**: Simultaneous sounds from different positions
 
-## Credits
+Press `Ctrl+C` to stop.
 
-- [ElevenLabs Conversational AI](https://elevenlabs.io/docs/conversational-ai) - Voice agent platform
-- [ElevenLabs Raspberry Pi Example](https://github.com/elevenlabs/elevenlabs-examples/tree/main/examples/conversational-ai/raspberry-pi) - Reference implementation
-- [Google Gemini](https://ai.google.dev/) - Multimodal AI for image analysis
-- [EfficientWord-Net](https://github.com/Ant-Brain/EfficientWord-Net) - Wake word detection
+7. **Working prototype**: Fully functional demo on actual hardware
 
-## License
+## Impact & Future Development
 
-MIT License
+### Potential Applications
+- **Home navigation**: "Where did I leave my keys?"
+- **Kitchen assistance**: "Guide me to the milk in the fridge"
+- **Office productivity**: "Find the document on my desk"
+- **Social situations**: "Who's in the room and where are they?"
+- **Shopping**: "Is this the product I'm looking for?"
+
+## Technical Highlights
+
+### Edge AI Processing
+- **YOLOv8n**: Lightweight YOLO variant optimized for edge devices
+- **Hailo-8L acceleration**: 13 TOPS performance enabling 30fps detection
+- **On-device inference**: No cloud dependency, works offline
+- **80 object classes**: COCO dataset trained model
+
+### Audio Engineering
+- **pyroomacoustics**: Room acoustics simulation library for realistic spatial positioning
+- **Bounding box mapping**: Direct conversion from pixel coordinates to stereo field
+- **Distinct sound signatures**: Different tones per object category
+- **Low-latency playback**: PyAudio for real-time audio output
+- **Acoustic realism**: Simulates natural sound propagation in 3D space
+
+### System Optimization
+- **Efficient pipeline**: Camera → YOLO → Audio in <50ms total latency
+- **Concurrent processing**: Parallel detection and audio generation
+- **Resource management**: Optimized for Pi 5's limited resources
+
+### Technology Stack
+- [Raspberry Pi AI HAT](https://www.raspberrypi.com/products/ai-hat/) with Hailo-8L accelerator
+- [YOLOv8](https://github.com/ultralytics/ultralytics) - Object detection
+- [Hailo](https://hailo.ai/) - AI hardware acceleration (13 TOPS)
+- [pyroomacoustics](https://github.com/LCAV/pyroomacoustics) - Spatial audio simulation
+
+## Links
+
+- **Main Project**: [MusicIsTheAnswer](https://github.com/giuliovv/MusicIsTheAnswer)
+- **Hackathon**: [EF x Raspberry Pi x Asteroid](https://luma.com/jp9aruxj)
+
+---
+
+*Built with ❤️ for accessibility. Spatial audio brings sight to sound.*
