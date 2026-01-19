@@ -296,6 +296,18 @@ class HRTFSpatialPlayer:
         )
         self._stream.start()
 
+    def pause(self):
+        """Pause playback without closing the stream."""
+        if self._stream and self.playing:
+            self._stream.stop()
+            self.playing = False
+
+    def resume(self):
+        """Resume playback after pause."""
+        if self._stream and not self.playing:
+            self._stream.start()
+            self.playing = True
+
     def stop(self):
         self.playing = False
         if self._stream:
