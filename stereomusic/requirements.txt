@@ -1,9 +1,15 @@
-# Spatial audio
+# Spatial audio (tested with Python 3.11)
 numpy
 sounddevice
 soundfile
-pyroomacoustics  # Enhanced room acoustics (optional, for future use)
+pyroomacoustics  # Enhanced room acoustics / HRTF
 
 # Object detection
 ultralytics  # YOLO v8
-opencv-python  # Image processing (or opencv-python-headless for servers)
+opencv-python-headless  # Headless OpenCV (no Qt/GUI, better for SSH/Pi)
+
+# Note: these may overlap with the root requirements.txt used by the
+# cash-recognition assistant. When in doubt, create a fresh virtualenv
+# and install both:
+#   pip install -r requirements.txt
+#   pip install -r stereomusic/requirements.txt

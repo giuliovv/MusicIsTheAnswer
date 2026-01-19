@@ -42,3 +42,12 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Local tools / emulators / traces
+__azurite_db_queue__.json
+__azurite_db_queue_extent__.json
+__queuestorage__/
+gstshark_*/
+
+# Local scratch files
+user.txt
